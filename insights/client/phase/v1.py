@@ -138,18 +138,20 @@ def post_update(client, config):
     new = False
     if config['reregister']:
         new = True
-        config['register'] = True
+        # config['register'] = True
         delete_registered_file()
         delete_unregistered_file()
         write_to_disk(constants.machine_id_file, delete=True)
     logger.debug('Machine-id: %s', generate_machine_id(new))
 
+    client.try_register()
     if config['register']:
-        registration = client.try_register()
-        if registration is None:
-            logger.info('Running connection test...')
-            client.test_connection()
-            sys.exit(constants.sig_kill_bad)
+
+        # registration = client.try_register()
+        # if registration is None:
+        #     logger.info('Running connection test...')
+        #     client.test_connection()
+        #     sys.exit(constants.sig_kill_bad)
         if (not config['disable_schedule'] and
            get_scheduler(config).set_daily()):
             logger.info('Automatic scheduling for Insights has been enabled.')
@@ -157,12 +159,12 @@ def post_update(client, config):
     # check registration before doing any uploads
     # only do this if we are not running in container mode
     # Ignore if in offline mode
-    if not config["analyze_container"]:
-        if not config['register'] and not config['offline']:
-            msg, is_registered = client._is_client_registered()
-            if not is_registered:
-                logger.error(msg)
-                sys.exit(constants.sig_kill_bad)
+    # if not config["analyze_container"]:
+    #     if not config['register'] and not config['offline']:
+    #         msg, is_registered = client._is_client_registered()
+    #         if not is_registered:
+    #             logger.error(msg)
+    #             sys.exit(constants.sig_kill_bad)
 
 
 @phase

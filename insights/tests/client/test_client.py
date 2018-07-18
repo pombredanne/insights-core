@@ -1,8 +1,12 @@
 import sys
+import os
 
 from insights.client import InsightsClient
 from insights.client.config import InsightsConfig
 from insights import package_info
+from insights.client.auto_config import try_auto_configuration
+from insights.client.constants import InsightsConstants as constants
+from insights.client.utlities import delete_registered_file, write_to_disk
 
 
 def test_version():
@@ -21,8 +25,14 @@ def test_version():
 
 
 def test_register():
+    delete_registered_file()
+    # write_to_disk()
     config = InsightsConfig(register=True)
     client = InsightsClient(config)
+    try_auto_configuration(config)
+    # print(config)
+    client.try_register()
+    assert os.path.isfile('/etc/insights-client/.registered') is True
 
 
 def test_unregister():

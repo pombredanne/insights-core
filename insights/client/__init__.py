@@ -414,11 +414,11 @@ class InsightsClient(object):
         """
         return client.delete_archive(path)
 
-    def _is_client_registered(self):
-        return client._is_client_registered(self.config)
+    def get_registration_status(self):
+        return client.get_registration_status(self.config)
 
     def try_register(self):
-        return client.try_register(self.config)
+        return client.handle_registration(self.config)
 
     def get_connection(self):
         return client.get_connection(self.config)
