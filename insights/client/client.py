@@ -115,7 +115,7 @@ def handle_registration(config, pconn):
     logger.debug('Machine-id: %s', generate_machine_id(config.reregister))
 
     # check registration with API
-    check = get_registration_status(config)
+    check = get_registration_status(config, pconn)
 
     for m in check['messages']:
         logger.debug(m)
