@@ -70,11 +70,16 @@ def test_force_reregister_container():
 
 
 def test_reg_check_registered():
-    config = InsightsConfig()
+    # register the machine first
+    config = InsightsConfig(register=True)
     client = InsightsClient(config)
     try_auto_configuration(config)
     assert client.register() is True
-    assert client.get_registration_information()['is_registered'] is True
+    config.register = False
+
+    # test function and integration in .register()
+    assert client.get_registration_information()['status'] is True
+    assert client.register() is True
     for r in constants.registered_files:
         assert os.path.isfile(r) is True
     for u in constants.unregistered_files:
@@ -82,11 +87,16 @@ def test_reg_check_registered():
 
 
 def test_reg_check_unregistered():
-    config = InsightsConfig()
+    # unregister the machine first
+    config = InsightsConfig(unregister=True)
     client = InsightsClient(config)
     try_auto_configuration(config)
     assert client.unregister() is True
-    assert client.get_registration_information()['is_registered'] is False
+    config.unregister = False
+
+    # test function and integration in .register()
+    assert client.get_registration_information()['status'] is False
+    assert client.register() is False
     for r in constants.registered_files:
         assert os.path.isfile(r) is False
     for u in constants.unregistered_files:
@@ -94,15 +104,22 @@ def test_reg_check_unregistered():
 
 
 def test_reg_check_registered_unreachable():
-    config = InsightsConfig(http_timeout=1)
+    # register the machine first
+    config = InsightsConfig(register=True)
     client = InsightsClient(config)
     try_auto_configuration(config)
     assert client.register() is True
+    config.register = False
+    config.http_timeout = 1
+
+    # set net delay and try to check registration
     subprocess.run(
         shlex.split('tc qdisc add dev eth0 root netem delay 1001ms'))
     assert client.get_registration_information()['unreachable'] is True
     assert client.register() is None
-    subprocess.run(shlex.split('tc qdisc del dev eth0 root netem delay 1001ms'))
+    subprocess.run(
+        shlex.split('tc qdisc del dev eth0 root netem delay 1001ms'))
+
     for r in constants.registered_files:
         assert os.path.isfile(r) is True
     for u in constants.unregistered_files:
@@ -110,10 +127,15 @@ def test_reg_check_registered_unreachable():
 
 
 def test_reg_check_unregistered_unreachable():
-    config = InsightsConfig(http_timeout=1)
+    # unregister the machine first
+    config = InsightsConfig(unregister=True)
     client = InsightsClient(config)
     try_auto_configuration(config)
     assert client.unregister() is True
+    config.unregister = False
+    config.http_timeout = 1
+
+    # set net delay and try to check registration
     subprocess.run(
         shlex.split('tc qdisc add dev eth0 root netem delay 1001ms'))
     assert client.get_registration_information()['unreachable'] is True
