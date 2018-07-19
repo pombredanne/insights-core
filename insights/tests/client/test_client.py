@@ -64,20 +64,22 @@ def test_force_reregister():
     assert client.register() is True
     for r in constants.registered_files:
         assert os.path.isfile(r) is True
+
     # get modified time of .registered to ensure it's regenerated
-    old_reg_file1_ts = os.getmtime(constants.registered_files[0])
-    old_reg_file2_ts = os.getmtime(constants.registered_files[1])
+    old_reg_file1_ts = os.path.getmtime(constants.registered_files[0])
+    old_reg_file2_ts = os.path.getmtime(constants.registered_files[1])
 
     with open(constants.machine_id_file) as mid:
         old_machine_id = mid.read()
 
+    # reregister with new machine-id
     config.reregister = True
     assert client.register() is True
 
     with open(constants.machine_id_file) as mid:
         new_machine_id = mid.read()
-    new_reg_file1_ts = os.getmtime(constants.registered_files[0])
-    new_reg_file2_ts = os.getmtime(constants.registered_files[1])
+    new_reg_file1_ts = os.path.getmtime(constants.registered_files[0])
+    new_reg_file2_ts = os.path.getmtime(constants.registered_files[1])
 
     assert old_machine_id != new_machine_id
     assert old_reg_file1_ts != new_reg_file1_ts
