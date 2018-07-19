@@ -149,6 +149,9 @@ DEFAULT_OPTS = {
         'help': 'Group to add this system to during registration',
         'action': 'store',
     },
+    'http_timeout': {
+        'default': 10
+    },
     'insecure_connection': {
         # non-CLI
         'default': False

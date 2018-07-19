@@ -1,6 +1,8 @@
 import sys
 import os
 import pytest
+import subprocess
+import shlex
 
 from insights.client import InsightsClient
 from insights.client.config import InsightsConfig
@@ -52,45 +54,73 @@ def test_force_reregister():
     config = InsightsConfig(reregister=True)
 
 
-def test_register_offline():
-    config = InsightsConfig(register=True, offline=True)
-    # nothing should happen
-
-
-def test_unregister_offline():
-    config = InsightsConfig(unregister=True, offline=True)
-    # nothing should happen
-
-
-def test_force_reregister_offline():
-    config = InsightsConfig(reregister=True, offline=True)
-    # nothing should happen
-
-
 def test_register_container():
     with pytest.raises(ValueError):
-        config = InsightsConfig(register=True, analyze_container=True)
+        InsightsConfig(register=True, analyze_container=True)
 
 
 def test_unregister_container():
     with pytest.raises(ValueError):
-        config = InsightsConfig(unregister=True, analyze_container=True)
-        # nothing should happen
+        InsightsConfig(unregister=True, analyze_container=True)
 
 
 def test_force_reregister_container():
     with pytest.raises(ValueError):
-        config = InsightsConfig(reregister=True, analyze_container=True)
-        # nothing should happen
+        InsightsConfig(reregister=True, analyze_container=True)
 
 
 def test_reg_check_registered():
     config = InsightsConfig()
+    client = InsightsClient(config)
+    try_auto_configuration(config)
+    assert client.register() is True
+    assert client.get_registration_information()['is_registered'] is True
+    for r in constants.registered_files:
+        assert os.path.isfile(r) is True
+    for u in constants.unregistered_files:
+        assert os.path.isfile(u) is False
 
 
 def test_reg_check_unregistered():
     config = InsightsConfig()
+    client = InsightsClient(config)
+    try_auto_configuration(config)
+    assert client.unregister() is True
+    assert client.get_registration_information()['is_registered'] is False
+    for r in constants.registered_files:
+        assert os.path.isfile(r) is False
+    for u in constants.unregistered_files:
+        assert os.path.isfile(u) is True
 
 
-def test_reg_check_unreachable():
-    config = InsightsConfig()
+def test_reg_check_registered_unreachable():
+    config = InsightsConfig(http_timeout=1)
+    client = InsightsClient(config)
+    try_auto_configuration(config)
+    assert client.register() is True
+    subprocess.run(
+        shlex.split('tc qdisc add dev eth0 root netem delay 1001ms'))
+    assert client.get_registration_information()['unreachable'] is True
+    assert client.register() is None
+    subprocess.run(shlex.split('tc qdisc del dev eth0 root netem delay 1001ms'))
+    for r in constants.registered_files:
+        assert os.path.isfile(r) is True
+    for u in constants.unregistered_files:
+        assert os.path.isfile(u) is False
+
+
+def test_reg_check_unregistered_unreachable():
+    config = InsightsConfig(http_timeout=1)
+    client = InsightsClient(config)
+    try_auto_configuration(config)
+    assert client.unregister() is True
+    subprocess.run(
+        shlex.split('tc qdisc add dev eth0 root netem delay 1001ms'))
+    assert client.get_registration_information()['unreachable'] is True
+    assert client.register() is None
+    subprocess.run(
+        shlex.split('tc qdisc del dev eth0 root netem delay 1001ms'))
+    for r in constants.registered_files:
+        assert os.path.isfile(r) is False
+    for u in constants.unregistered_files:
+        assert os.path.isfile(u) is True

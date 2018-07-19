@@ -162,7 +162,7 @@ def post_update(client, config):
         # unregistered
         sys.exit(constants.sig_kill_bad)
     if config.register:
-        if (not config['disable_schedule'] and
+        if (not config.disable_schedule and
            get_scheduler(config).set_daily()):
             logger.info('Automatic scheduling for Insights has been enabled.')
 

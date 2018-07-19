@@ -49,7 +49,7 @@ class InsightsClient(object):
 
     def register(self):
         """
-            Returns:
+            returns (bool | None):
                 True - machine is registered
                 False - machine is unregistered
                 None - could not reach the API
@@ -64,13 +64,13 @@ class InsightsClient(object):
 
     def get_registration_information(self):
         """
-            returns (json): {'machine-id': uuid from API,
-                            'response': response from API}
+            returns (json):
+                {'messages': [dotfile message, api message],
+                 'status': (bool) registered = true; unregistered = false
+                 'unreg_date': Date the machine was unregistered | None,
+                 'unreachable': API could not be reached}
         """
-        registration_status = client.get_registration_status()
-        return {'machine-id': client.get_machine_id(),
-                'registration_status': registration_status,
-                'is_registered': registration_status['status']}
+        return client.get_registration_status(self.config)
 
     def test_connection(self):
         """

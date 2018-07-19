@@ -233,9 +233,9 @@ class InsightsConnection(object):
                 logger.debug("Testing: %s", test_url + ext)
                 if method is "POST":
                     test_req = self.session.post(
-                        test_url + ext, timeout=10, data=test_flag)
+                        test_url + ext, timeout=self.config.http_timeout, data=test_flag)
                 elif method is "GET":
-                    test_req = self.session.get(test_url + ext, timeout=10)
+                    test_req = self.session.get(test_url + ext, timeout=self.config.http_timeout)
                 logger.info("HTTP Status Code: %d", test_req.status_code)
                 logger.info("HTTP Status Text: %s", test_req.reason)
                 logger.info("HTTP Response Text: %s", test_req.text)
@@ -574,7 +574,7 @@ class InsightsConnection(object):
         try:
             url = self.api_url + '/v1/systems/' + machine_id
             net_logger.info("GET %s", url)
-            res = self.session.get(url, timeout=10)
+            res = self.session.get(url, timeout=self.config.http_timeout)
         except requests.ConnectionError:
             # can't connect, run connection test
             logger.error('Connection timed out. Running connection test...')
