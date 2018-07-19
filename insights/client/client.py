@@ -18,7 +18,7 @@ from .utilities import (generate_machine_id,
                         determine_hostname)
 from .collection_rules import InsightsUploadConf
 from .data_collector import DataCollector
-# from .connection import InsightsConnection
+from .connection import InsightsConnection
 from .archive import InsightsArchive
 from .support import registration_check
 from .constants import InsightsConstants as constants
@@ -83,6 +83,10 @@ def set_up_logging(config):
         logging.root.addHandler(get_file_handler(config))
         configure_level(config)
         logger.debug("Logging initialized")
+
+
+def get_connection(config):
+    return InsightsConnection(config)
 
 
 def test_connection(pconn):
