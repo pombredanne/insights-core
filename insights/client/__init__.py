@@ -38,12 +38,12 @@ class InsightsClient(object):
         self.connection = None
 
     def _net(func):
-        def _init_connection(self):
+        def _init_connection(self, *args, **kwargs):
             # setup a request session
             if not self.config.offline and not self.session:
                 self.connection = client.get_connection(self.config)
                 self.session = self.connection.session
-            return func(self)
+            return func(self, *args, **kwargs)
         return _init_connection
 
     def get_conf(self):
