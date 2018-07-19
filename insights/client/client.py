@@ -96,7 +96,7 @@ def test_connection(pconn):
     return pconn.test_connection()
 
 
-def handle_registration(config):
+def handle_registration(config, pconn):
     '''
         Handle the registration process
         Returns:
@@ -136,7 +136,7 @@ def handle_registration(config):
 
     if config.register:
         # register if specified
-        message, hostname, group, display_name = _register(config)
+        message, hostname, group, display_name = _register(config, pconn)
         if not hostname:
             # API could not be reached, run connection test and exit
             logger.error(message)

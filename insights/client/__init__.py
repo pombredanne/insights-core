@@ -43,7 +43,7 @@ class InsightsClient(object):
             if not self.session:
                 self.connection = client.get_connection(self.config)
                 self.session = self.connection.session
-            func()
+            return func(self)
         return _init_connection
 
     def get_conf(self):
