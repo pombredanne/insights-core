@@ -3,6 +3,7 @@ import os
 import pytest
 import subprocess
 import shlex
+import requests
 
 from insights.client import InsightsClient
 from insights.client.config import InsightsConfig
@@ -112,14 +113,17 @@ def test_reg_check_registered_unreachable():
     config.register = False
     config.http_timeout = 1
 
+    print(config)
+    print(client.config)
+    print(client.connection.config)
     # set net delay and try to check registration
-    subprocess.call(
-        shlex.split('tc qdisc add dev eth0 root netem delay 1001ms'))
-    assert client.get_registration_information()['unreachable'] is True
-    assert client.register() is None
-    subprocess.call(
-        shlex.split('tc qdisc del dev eth0 root netem delay 1001ms'))
-
+    with pytest.raises(requests.exceptions.Timeout):
+        subprocess.call(
+            shlex.split('tc qdisc add dev eth0 root netem delay 1001ms'))
+        assert client.get_registration_information()['unreachable'] is True
+        assert client.register() is None
+        subprocess.call(
+            shlex.split('tc qdisc del dev eth0 root netem delay 1001ms'))
     for r in constants.registered_files:
         assert os.path.isfile(r) is True
     for u in constants.unregistered_files:
@@ -136,12 +140,13 @@ def test_reg_check_unregistered_unreachable():
     config.http_timeout = 1
 
     # set net delay and try to check registration
-    subprocess.call(
-        shlex.split('tc qdisc add dev eth0 root netem delay 1001ms'))
-    assert client.get_registration_information()['unreachable'] is True
-    assert client.register() is None
-    subprocess.call(
-        shlex.split('tc qdisc del dev eth0 root netem delay 1001ms'))
+    with pytest.raises(requests.exceptions.Timeout):
+        subprocess.call(
+            shlex.split('tc qdisc add dev eth0 root netem delay 1001ms'))
+        assert client.get_registration_information()['unreachable'] is True
+        assert client.register() is None
+        subprocess.call(
+            shlex.split('tc qdisc del dev eth0 root netem delay 1001ms'))
     for r in constants.registered_files:
         assert os.path.isfile(r) is False
     for u in constants.unregistered_files:
