@@ -15,18 +15,15 @@ from .utilities import (generate_machine_id,
                         write_to_disk,
                         write_registered_file,
                         write_unregistered_file,
-                        delete_registered_file,
-                        delete_unregistered_file,
                         determine_hostname)
 from .collection_rules import InsightsUploadConf
 from .data_collector import DataCollector
-from .connection import InsightsConnection
+# from .connection import InsightsConnection
 from .archive import InsightsArchive
 from .support import registration_check
 from .constants import InsightsConstants as constants
 
 LOG_FORMAT = ("%(asctime)s %(levelname)8s %(name)s %(message)s")
-INSIGHTS_CONNECTION = None
 logger = logging.getLogger(__name__)
 
 
@@ -88,11 +85,10 @@ def set_up_logging(config):
         logger.debug("Logging initialized")
 
 
-def test_connection(config):
+def test_connection(pconn):
     """
     Test the connection
     """
-    pconn = get_connection(config)
     return pconn.test_connection()
 
 
@@ -167,7 +163,7 @@ def handle_registration(config):
         return False
 
 
-def _register(config):
+def _register(config, pconn):
     """
     Do registration using basic auth
     """
@@ -178,19 +174,24 @@ def _register(config):
     if not username and not password and not auto_config and authmethod == 'BASIC':
         logger.debug('Username and password must be defined in configuration file with BASIC authentication method.')
         return False
-    pconn = get_connection(config)
     return pconn.register()
 
 
-def get_registration_status(config):
-    return registration_check(get_connection(config))
+def get_registration_status(config, pconn):
+    '''
+        Handle the registration process
+        Returns:
+            True - machine is registered
+            False - machine is unregistered
+            None - could not reach the API
+    '''
+    return registration_check(pconn)
 
 
-def handle_unregistration(config):
+def handle_unregistration(config, pconn):
     """
         returns (bool): True success, False failure
     """
-    pconn = get_connection(config)
     return pconn.unregister()
 
 
@@ -198,13 +199,12 @@ def get_machine_id():
     return generate_machine_id()
 
 
-def update_rules(config):
-    pconn = get_connection(config)
+def update_rules(config, pconn):
     pc = InsightsUploadConf(config, conn=pconn)
     return pc.get_conf(True, {})
 
 
-def get_branch_info(config):
+def get_branch_info(config, pconn):
     """
     Get branch info for a system
     returns (dict): {'remote_branch': -1, 'remote_leaf': -1}
@@ -220,7 +220,6 @@ def get_branch_info(config):
 
     # otherwise continue reaching out to obtain branch info
     try:
-        pconn = get_connection(config)
         branch_info = pconn.branch_info()
     except LookupError:
         logger.debug("There was an error obtaining branch information.")
@@ -371,16 +370,8 @@ def collect(config):
     return tar_file
 
 
-def get_connection(config):
-    global INSIGHTS_CONNECTION
-    if INSIGHTS_CONNECTION is None:
-        INSIGHTS_CONNECTION = InsightsConnection(config)
-    return INSIGHTS_CONNECTION
-
-
-def upload(config, tar_file, collection_duration=None):
+def upload(config, pconn, tar_file, collection_duration=None):
     logger.info('Uploading Insights data.')
-    pconn = get_connection(config)
     api_response = None
     for tries in range(config.retries):
         upload = pconn.upload_archive(tar_file, collection_duration)

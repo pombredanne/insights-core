@@ -37,6 +37,15 @@ class InsightsClient(object):
         self.session = None
         self.connection = None
 
+    def _net(func):
+        def _init_connection(self):
+            # setup a request session
+            if not self.session:
+                self.connection = client.get_connection(self.config)
+                self.session = self.connection.session
+            func()
+        return _init_connection
+
     def get_conf(self):
         # need this getter to maintain compatability with RPM wrapper
         return self.config
@@ -47,6 +56,7 @@ class InsightsClient(object):
     def version(self):
         return "%s-%s" % (package_info["VERSION"], package_info["RELEASE"])
 
+    @_net
     def register(self):
         """
             returns (bool | None):
@@ -54,14 +64,16 @@ class InsightsClient(object):
                 False - machine is unregistered
                 None - could not reach the API
         """
-        return client.handle_registration(self.config)
+        return client.handle_registration(self.config, self.connection)
 
+    @_net
     def unregister(self):
         """
             returns (bool): True success, False failure
         """
-        return client.handle_unregistration(self.config)
+        return client.handle_unregistration(self.config, self.connection)
 
+    @_net
     def get_registration_information(self):
         """
             returns (json):
@@ -70,22 +82,21 @@ class InsightsClient(object):
                  'unreg_date': Date the machine was unregistered | None,
                  'unreachable': API could not be reached}
         """
-        return client.get_registration_status(self.config)
+        return client.get_registration_status(self.config, self.connection)
 
+    @_net
     def test_connection(self):
         """
             returns (int): 0 if success 1 if failure
         """
-        return client.test_connection()
+        return client.test_connection(self.connection)
 
+    @_net
     def branch_info(self):
         """
             returns (dict): {'remote_leaf': -1, 'remote_branch': -1}
         """
-        return client.get_branch_info()
-
-    def handle_startup(self):
-        return client.handle_startup()
+        return client.get_branch_info(self.config, self.connection)
 
     def fetch(self, force=False):
         """
@@ -117,15 +128,11 @@ class InsightsClient(object):
 
             return fetch_results
 
+    @_net
     def _fetch(self, path, etag_file, target_path, force):
         """
             returns (str): path to new egg. None if no update.
         """
-        # setup a request session
-        if not self.session:
-            self.connection = client.get_connection(self.config)
-            self.session = self.connection.session
-
         url = self.connection.base_url + path
         # Searched for cached etag information
         current_etag = None
@@ -329,7 +336,7 @@ class InsightsClient(object):
             returns (int): upload status code
         """
         # do the upload
-        upload_results = client.upload(self.config, path)
+        upload_results = client.upload(self.config, self.connection, path)
         if upload_results:
 
             # delete the archive
@@ -412,10 +419,7 @@ class InsightsClient(object):
         return client.delete_archive(path)
 
     def get_registration_status(self):
-        return client.get_registration_status(self.config)
-
-    def get_connection(self):
-        return client.get_connection(self.config)
+        return client.get_registration_status(self.config, self.connection)
 
 
 def format_config(config):
