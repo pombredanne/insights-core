@@ -40,7 +40,7 @@ class InsightsClient(object):
     def _net(func):
         def _init_connection(self):
             # setup a request session
-            if not self.session:
+            if not self.config.offline and not self.session:
                 self.connection = client.get_connection(self.config)
                 self.session = self.connection.session
             return func(self)
@@ -321,11 +321,12 @@ class InsightsClient(object):
             logger.debug("Bypassing rule update due to config "
                 "running in offline mode or auto updating turned off.")
         else:
-            return client.update_rules(self.config)
+            return client.update_rules(self.config, self.connection)
 
+    @_net
     def collect(self):
         # return collection results
-        tar_file = client.collect(self.config)
+        tar_file = client.collect(self.config, self.connection)
 
         # it is important to note that --to-stdout is utilized via the wrapper RPM
         # this file is received and then we invoke shutil.copyfileobj

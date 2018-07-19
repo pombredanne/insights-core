@@ -233,7 +233,7 @@ def get_branch_info(config, pconn):
     return branch_info
 
 
-def collect(config):
+def collect(config, pconn):
     """
     All the heavy lifting done here
     """
@@ -270,7 +270,7 @@ def collect(config):
         logger.debug("Host selected as scanning target.")
         target = constants.default_target
 
-    branch_info = get_branch_info(config)
+    branch_info = get_branch_info(config, pconn)
     pc = InsightsUploadConf(config)
     tar_file = None
 
