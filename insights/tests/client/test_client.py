@@ -32,7 +32,6 @@ def test_register():
     config = InsightsConfig(register=True)
     client = InsightsClient(config)
     try_auto_configuration(config)
-    assert client.unregister() is True
     assert client.register() is True
     for r in constants.registered_files:
         assert os.path.isfile(r) is True
