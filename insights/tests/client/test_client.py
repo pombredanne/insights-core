@@ -31,8 +31,9 @@ def test_register():
     assert client.unregister() is True
     assert client.register() is True
     for r in constants.registered_files:
-        assert os.path.isfile(constants.registered_files[r]) is True
-        assert os.path.isfile(constants.unregistered_files[r]) is False
+        assert os.path.isfile(r) is True
+    for u in constants.unregistered_files:
+        assert os.path.isfile(u) is False
 
 
 def test_unregister():
@@ -41,8 +42,9 @@ def test_unregister():
     try_auto_configuration(config)
     assert client.unregister() is True
     for r in constants.registered_files:
-        assert os.path.isfile(constants.registered_files[r]) is False
-        assert os.path.isfile(constants.unregistered_files[r]) is True
+        assert os.path.isfile(r) is False
+    for u in constants.unregistered_files:
+        assert os.path.isfile(u) is True
 
 
 def test_force_reregister():
