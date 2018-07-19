@@ -113,11 +113,11 @@ def test_reg_check_registered_unreachable():
     config.http_timeout = 1
 
     # set net delay and try to check registration
-    subprocess.run(
+    subprocess.call(
         shlex.split('tc qdisc add dev eth0 root netem delay 1001ms'))
     assert client.get_registration_information()['unreachable'] is True
     assert client.register() is None
-    subprocess.run(
+    subprocess.call(
         shlex.split('tc qdisc del dev eth0 root netem delay 1001ms'))
 
     for r in constants.registered_files:
@@ -136,11 +136,11 @@ def test_reg_check_unregistered_unreachable():
     config.http_timeout = 1
 
     # set net delay and try to check registration
-    subprocess.run(
+    subprocess.call(
         shlex.split('tc qdisc add dev eth0 root netem delay 1001ms'))
     assert client.get_registration_information()['unreachable'] is True
     assert client.register() is None
-    subprocess.run(
+    subprocess.call(
         shlex.split('tc qdisc del dev eth0 root netem delay 1001ms'))
     for r in constants.registered_files:
         assert os.path.isfile(r) is False
