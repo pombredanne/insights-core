@@ -1,5 +1,6 @@
 import sys
 import os
+import pytest
 
 from insights.client import InsightsClient
 from insights.client.config import InsightsConfig
@@ -67,18 +68,20 @@ def test_force_reregister_offline():
 
 
 def test_register_container():
-    config = InsightsConfig(register=True, analyze_container=True)
-    # nothing should happen
+    with pytest.raises(ValueError):
+        config = InsightsConfig(register=True, analyze_container=True)
 
 
 def test_unregister_container():
-    config = InsightsConfig(unregister=True, analyze_container=True)
-    # nothing should happen
+    with pytest.raises(ValueError):
+        config = InsightsConfig(unregister=True, analyze_container=True)
+        # nothing should happen
 
 
 def test_force_reregister_container():
-    config = InsightsConfig(reregister=True, analyze_container=True)
-    # nothing should happen
+    with pytest.raises(ValueError):
+        config = InsightsConfig(reregister=True, analyze_container=True)
+        # nothing should happen
 
 
 def test_reg_check_registered():
