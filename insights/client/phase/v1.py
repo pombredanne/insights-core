@@ -132,17 +132,6 @@ def post_update(client, config):
         else:
             sys.exit(constants.sig_kill_bad)
 
-    # force-reregister -- remove machine-id files and registration files
-    # before trying to register again
-    new = False
-    if config.reregister:
-        new = True
-        # config['register'] = True
-        delete_registered_file()
-        delete_unregistered_file()
-        write_to_disk(constants.machine_id_file, delete=True)
-    logger.debug('Machine-id: %s', generate_machine_id(new))
-
     if config.offline:
         logger.debug('Running client in offline mode. Bypassing registration.')
         return

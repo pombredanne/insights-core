@@ -53,6 +53,35 @@ def test_unregister():
 
 def test_force_reregister():
     config = InsightsConfig(reregister=True)
+    client = InsightsClient(config)
+    try_auto_configuration(config)
+
+    # initialize comparisons
+    old_machine_id = None
+    new_machine_id = None
+
+    # register first
+    assert client.register() is True
+    for r in constants.registered_files:
+        assert os.path.isfile(r) is True
+    # get modified time of .registered to ensure it's regenerated
+    old_reg_file1_ts = os.getmtime(constants.registered_files[0])
+    old_reg_file2_ts = os.getmtime(constants.registered_files[1])
+
+    with open(constants.machine_id_file) as mid:
+        old_machine_id = mid.read()
+
+    config.reregister = True
+    assert client.register() is True
+
+    with open(constants.machine_id_file) as mid:
+        new_machine_id = mid.read()
+    new_reg_file1_ts = os.getmtime(constants.registered_files[0])
+    new_reg_file2_ts = os.getmtime(constants.registered_files[1])
+
+    assert old_machine_id != new_machine_id
+    assert old_reg_file1_ts != new_reg_file1_ts
+    assert old_reg_file2_ts != new_reg_file2_ts
 
 
 def test_register_container():

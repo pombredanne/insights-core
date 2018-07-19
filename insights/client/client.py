@@ -15,6 +15,8 @@ from .utilities import (generate_machine_id,
                         write_to_disk,
                         write_registered_file,
                         write_unregistered_file,
+                        delete_registered_file,
+                        delete_unregistered_file,
                         determine_hostname)
 from .collection_rules import InsightsUploadConf
 from .data_collector import DataCollector
@@ -104,13 +106,12 @@ def handle_registration(config, pconn):
             False - machine is unregistered
             None - could not reach the API
     '''
-    # def _clear_all():
-    #     delete_registered_file()
-    #     delete_unregistered_file()
-    #     write_to_disk(constants.machine_id_file, delete=True)
-
-    # if config.reregister:
-    #     _clear_all()
+    # force-reregister -- remove machine-id files and registration files
+    # before trying to register again
+    if config.reregister:
+        delete_registered_file()
+        delete_unregistered_file()
+        write_to_disk(constants.machine_id_file, delete=True)
 
     logger.debug('Machine-id: %s', generate_machine_id(config.reregister))
 
