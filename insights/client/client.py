@@ -99,6 +99,10 @@ def test_connection(config):
 def handle_registration(config):
     '''
         Handle the registration process
+        Returns:
+            True - machine is registered
+            False - machine is unregistered
+            None - could not reach the API
     '''
     # def _clear_all():
     #     delete_registered_file()
@@ -118,24 +122,25 @@ def handle_registration(config):
 
     if check['unreachable']:
         # Run connection test and exit
-        return
+        return None
 
     if check['status']:
         # registered in API, resync files
         if config.register:
             logger.info('This host has already been registered.')
         write_registered_file()
-        delete_unregistered_file()
-        return
+        return True
 
     # unregistered in API, resync files
-    delete_registered_file()
-    if check['unreg_date']:
-        write_unregistered_file(date=check['unreg_date'])
+    write_unregistered_file(date=check['unreg_date'])
 
     if config.register:
         # register if specified
-        message, hostname, group, display_name = register(config)
+        message, hostname, group, display_name = _register(config)
+        if not hostname:
+            # API could not be reached, run connection test and exit
+            logger.error(message)
+            return None
         if config.display_name is None and config.group is None:
             logger.info('Successfully registered host %s', hostname)
         elif config.display_name is None:
@@ -146,10 +151,11 @@ def handle_registration(config):
                         hostname, display_name, group)
         if message:
             logger.info(message)
-        return reg_check, message, hostname, group, display_name
+        write_registered_file()
+        return True
     else:
         # print messaging and exit
-        if unreg_date:
+        if check['unreg_date']:
             # registered and then unregistered
             logger.info('This machine has been unregistered. '
                         'Use --register if you would like to '
@@ -158,10 +164,10 @@ def handle_registration(config):
             # not yet registered
             logger.info('This machine has not yet been registered.'
                         'Use --register to register this machine.')
-        return
+        return False
 
 
-def register(config):
+def _register(config):
     """
     Do registration using basic auth
     """

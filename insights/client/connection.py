@@ -644,8 +644,6 @@ class InsightsConnection(object):
 
         message = system.headers.get("x-rh-message", "")
 
-        write_registered_file()
-
         # Do grouping
         if self.config.group is not None:
             self.do_group()

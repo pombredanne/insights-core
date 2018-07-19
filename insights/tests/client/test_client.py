@@ -6,7 +6,7 @@ from insights.client.config import InsightsConfig
 from insights import package_info
 from insights.client.auto_config import try_auto_configuration
 from insights.client.constants import InsightsConstants as constants
-from insights.client.utlities import delete_registered_file, write_to_disk
+# from insights.client.utilities import delete_registered_file, write_to_disk
 
 
 def test_version():
@@ -25,18 +25,24 @@ def test_version():
 
 
 def test_register():
-    delete_registered_file()
-    # write_to_disk()
     config = InsightsConfig(register=True)
     client = InsightsClient(config)
     try_auto_configuration(config)
-    # print(config)
-    client.try_register()
-    assert os.path.isfile('/etc/insights-client/.registered') is True
+    assert client.unregister() is True
+    assert client.register() is True
+    for r in constants.registered_files:
+        assert os.path.isfile(constants.registered_files[r]) is True
+        assert os.path.isfile(constants.unregistered_files[r]) is False
 
 
 def test_unregister():
     config = InsightsConfig(unregister=True)
+    client = InsightsClient(config)
+    try_auto_configuration(config)
+    assert client.unregister() is True
+    for r in constants.registered_files:
+        assert os.path.isfile(constants.registered_files[r]) is False
+        assert os.path.isfile(constants.unregistered_files[r]) is True
 
 
 def test_force_reregister():
@@ -49,12 +55,27 @@ def test_register_offline():
 
 
 def test_unregister_offline():
-    config = InsightsConfig(unregister=True)
+    config = InsightsConfig(unregister=True, offline=True)
     # nothing should happen
 
 
 def test_force_reregister_offline():
-    config = InsightsConfig(reregister=True)
+    config = InsightsConfig(reregister=True, offline=True)
+    # nothing should happen
+
+
+def test_register_container():
+    config = InsightsConfig(register=True, analyze_container=True)
+    # nothing should happen
+
+
+def test_unregister_container():
+    config = InsightsConfig(unregister=True, analyze_container=True)
+    # nothing should happen
+
+
+def test_force_reregister_container():
+    config = InsightsConfig(reregister=True, analyze_container=True)
     # nothing should happen
 
 

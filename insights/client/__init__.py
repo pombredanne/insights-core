@@ -47,6 +47,31 @@ class InsightsClient(object):
     def version(self):
         return "%s-%s" % (package_info["VERSION"], package_info["RELEASE"])
 
+    def register(self):
+        """
+            Returns:
+                True - machine is registered
+                False - machine is unregistered
+                None - could not reach the API
+        """
+        return client.handle_registration(self.config)
+
+    def unregister(self):
+        """
+            returns (bool): True success, False failure
+        """
+        return client.handle_unregistration(self.config)
+
+    def get_registration_information(self):
+        """
+            returns (json): {'machine-id': uuid from API,
+                            'response': response from API}
+        """
+        registration_status = client.get_registration_status()
+        return {'machine-id': client.get_machine_id(),
+                'registration_status': registration_status,
+                'is_registered': registration_status['status']}
+
     def test_connection(self):
         """
             returns (int): 0 if success 1 if failure
@@ -299,34 +324,6 @@ class InsightsClient(object):
         # this file is received and then we invoke shutil.copyfileobj
         return tar_file
 
-    def register(self, force_register=False):
-        """
-            returns (json): {'success': bool,
-                            'machine-id': uuid from API,
-                            'response': response from API,
-                            'code': http code}
-        """
-        self.config.register = True
-        if force_register:
-            self.config.reregister = True
-        return client.handle_registration()
-
-    def unregister(self):
-        """
-            returns (bool): True success, False failure
-        """
-        return client.handle_unregistration()
-
-    def get_registration_information(self):
-        """
-            returns (json): {'machine-id': uuid from API,
-                            'response': response from API}
-        """
-        registration_status = client.get_registration_status()
-        return {'machine-id': client.get_machine_id(),
-                'registration_status': registration_status,
-                'is_registered': registration_status['status']}
-
     def upload(self, path, rotate_eggs=True):
         """
             returns (int): upload status code
@@ -416,9 +413,6 @@ class InsightsClient(object):
 
     def get_registration_status(self):
         return client.get_registration_status(self.config)
-
-    def try_register(self):
-        return client.handle_registration(self.config)
 
     def get_connection(self):
         return client.get_connection(self.config)
