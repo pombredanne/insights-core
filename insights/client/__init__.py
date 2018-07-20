@@ -57,34 +57,6 @@ class InsightsClient(object):
         return "%s-%s" % (package_info["VERSION"], package_info["RELEASE"])
 
     @_net
-    def register(self):
-        """
-            returns (bool | None):
-                True - machine is registered
-                False - machine is unregistered
-                None - could not reach the API
-        """
-        return client.handle_registration(self.config, self.connection)
-
-    @_net
-    def unregister(self):
-        """
-            returns (bool): True success, False failure
-        """
-        return client.handle_unregistration(self.config, self.connection)
-
-    @_net
-    def get_registration_information(self):
-        """
-            returns (json):
-                {'messages': [dotfile message, api message],
-                 'status': (bool) registered = true; unregistered = false
-                 'unreg_date': Date the machine was unregistered | None,
-                 'unreachable': API could not be reached}
-        """
-        return client.get_registration_status(self.config, self.connection)
-
-    @_net
     def test_connection(self):
         """
             returns (int): 0 if success 1 if failure
@@ -331,6 +303,34 @@ class InsightsClient(object):
         # it is important to note that --to-stdout is utilized via the wrapper RPM
         # this file is received and then we invoke shutil.copyfileobj
         return tar_file
+
+    @_net
+    def register(self):
+        """
+            returns (bool | None):
+                True - machine is registered
+                False - machine is unregistered
+                None - could not reach the API
+        """
+        return client.handle_registration(self.config, self.connection)
+
+    @_net
+    def unregister(self):
+        """
+            returns (bool): True success, False failure
+        """
+        return client.handle_unregistration(self.config, self.connection)
+
+    @_net
+    def get_registration_information(self):
+        """
+            returns (json):
+                {'messages': [dotfile message, api message],
+                 'status': (bool) registered = true; unregistered = false
+                 'unreg_date': Date the machine was unregistered | None,
+                 'unreachable': API could not be reached}
+        """
+        return client.get_registration_status(self.config, self.connection)
 
     def upload(self, path, rotate_eggs=True):
         """
