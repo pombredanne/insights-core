@@ -87,15 +87,25 @@ def set_up_logging(config):
         logger.debug("Logging initialized")
 
 
-def get_connection(config):
-    return InsightsConnection(config)
-
-
 def test_connection(pconn):
     """
     Test the connection
     """
     return pconn.test_connection()
+
+
+def register(config, pconn):
+    """
+    Do registration using basic auth
+    """
+    username = config.username
+    password = config.password
+    authmethod = config.authmethod
+    auto_config = config.auto_config
+    if not username and not password and not auto_config and authmethod == 'BASIC':
+        logger.debug('Username and password must be defined in configuration file with BASIC authentication method.')
+        return False
+    return pconn.register()
 
 
 def handle_registration(config, pconn):
@@ -137,7 +147,7 @@ def handle_registration(config, pconn):
 
     if config.register:
         # register if specified
-        message, hostname, group, display_name = _register(config, pconn)
+        message, hostname, group, display_name = register(config, pconn)
         if not hostname:
             # API could not be reached, run connection test and exit
             logger.error(message)
@@ -166,20 +176,6 @@ def handle_registration(config, pconn):
             logger.info('This machine has not yet been registered.'
                         'Use --register to register this machine.')
         return False
-
-
-def _register(config, pconn):
-    """
-    Do registration using basic auth
-    """
-    username = config.username
-    password = config.password
-    authmethod = config.authmethod
-    auto_config = config.auto_config
-    if not username and not password and not auto_config and authmethod == 'BASIC':
-        logger.debug('Username and password must be defined in configuration file with BASIC authentication method.')
-        return False
-    return pconn.register()
 
 
 def get_registration_status(config, pconn):
@@ -373,6 +369,10 @@ def collect(config, pconn):
         compressed_filesystem.cleanup_temp_filesystem()
 
     return tar_file
+
+
+def get_connection(config):
+    return InsightsConnection(config)
 
 
 def upload(config, pconn, tar_file, collection_duration=None):
