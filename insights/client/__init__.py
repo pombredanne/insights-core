@@ -61,7 +61,7 @@ class InsightsClient(object):
         """
             returns (int): 0 if success 1 if failure
         """
-        return client.test_connection(self.connection)
+        return self.connection.test_connection()
 
     @_net
     def branch_info(self):

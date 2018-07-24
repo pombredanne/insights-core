@@ -97,8 +97,7 @@ def pre_update(client, config):
     # test the insights connection
     if config.test_connection:
         logger.info("Running Connection Tests...")
-        pconn = client.get_connection()
-        rc = pconn.test_connection()
+        rc = client.test_connection()
         if rc == 0:
             sys.exit(constants.sig_kill_ok)
         else:

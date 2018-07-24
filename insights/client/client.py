@@ -87,13 +87,6 @@ def set_up_logging(config):
         logger.debug("Logging initialized")
 
 
-def test_connection(pconn):
-    """
-    Test the connection
-    """
-    return pconn.test_connection()
-
-
 def register(config, pconn):
     """
     Do registration using basic auth
