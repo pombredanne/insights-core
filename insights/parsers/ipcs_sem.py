@@ -12,6 +12,7 @@ IpcsSI - command ``ipcs -s -i {semaphore ID}``
 ----------------------------------------------
 
 """
+from insights.util import deprecated
 from .. import parser, get_active_lines, CommandParser
 from . import parse_delimited_table
 from insights.specs import Specs
@@ -20,6 +21,10 @@ from insights.specs import Specs
 @parser(Specs.ipcs_s)
 class IpcsS(CommandParser):
     """
+    .. warning::
+        This parser is deprecated, please use
+        :py:class:`insights.parsers.ipcs.IpcsS` instead.
+
     Class for parsing the output of `ipcs -s` command.
 
     Typical output of the command is::
@@ -49,6 +54,9 @@ class IpcsS(CommandParser):
         >>> sem.get('262150')
         {'owner': 'postgres', 'perms': '600', 'nsems': '1', 'key': '0x00000000'}
     """
+    def __init__(self, *args, **kwargs):
+        deprecated(IpcsS, "Import IpcsS from insights.parsers.ipcs instead")
+        super(IpcsS, self).__init__(*args, **kwargs)
 
     def parse_content(self, content):
         # heading_ignore is first line we _don't_ want to ignore...
@@ -88,6 +96,10 @@ class IpcsS(CommandParser):
 @parser(Specs.ipcs_s_i)
 class IpcsSI(CommandParser):
     """
+    .. warning::
+        This parser is deprecated, please use
+        :py:class:`insights.parsers.ipcs.IpcsSI` instead.
+
     Class for parsing the output of `ipcs -s -i ##` command. ``##`` will be
     replaced with specific semid
 
@@ -119,6 +131,9 @@ class IpcsSI(CommandParser):
         ['0', '2265', '4390', '6151', '6152']
 
     """
+    def __init__(self, *args, **kwargs):
+        deprecated(IpcsSI, "Import IpcsSI from insights.parsers.ipcs instead")
+        super(IpcsSI, self).__init__(*args, **kwargs)
 
     def parse_content(self, content):
         # parse the output of `ipcs -s -i ##` command

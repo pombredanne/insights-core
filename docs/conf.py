@@ -12,6 +12,9 @@
 # All configuration values have a default; values that are commented out
 # serve to show the default.
 
+# Note that sphinx is not supported on Python 2.6. That's because the 
+# library used (nbsphinx) doesn’t support this legacy version of Python.
+
 import sys
 import os
 import insights
@@ -155,6 +158,9 @@ html_theme = 'sphinx_rtd_theme'
 # If true, SmartyPants will be used to convert quotes and dashes to
 # typographically correct entities.
 #html_use_smartypants = True
+
+# Don't convert characters to em-dash (---) and en-dash (--) chars
+smartquotes_action = 'qe'
 
 # Custom sidebar templates, maps document names to template names.
 #html_sidebars = {}

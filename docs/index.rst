@@ -13,13 +13,15 @@ Contents:
     api_index
     parsers_index
     combiners_index
+    components_index
     docs_guidelines
-    rule_tutorial_index
-    custom_tutorial_index
-    combiner_tutorial
     components
+    embedded_content
+    tools
+    component_config
     notebook_index
-    examples/README
+    manpages_index
+    cheatsheets_index
 
 Indices and tables
 ==================

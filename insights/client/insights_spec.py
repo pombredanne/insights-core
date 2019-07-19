@@ -9,15 +9,9 @@ from tempfile import NamedTemporaryFile
 from insights.util import mangle
 
 from .constants import InsightsConstants as constants
+from .utilities import determine_hostname
 
 logger = logging.getLogger(__name__)
-
-
-def shlex_split(cmd):
-    if six.PY3:
-        return shlex.split(cmd)
-    else:
-        return shlex.split(cmd.encode('utf-8'))
 
 
 class InsightsSpec(object):
@@ -41,26 +35,33 @@ class InsightsCommand(InsightsSpec):
         self.command = spec['command'].replace(
             '{CONTAINER_MOUNT_POINT}', mountpoint)
         self.archive_path = mangle.mangle_command(self.command)
+        self.is_hostname = spec.get('symbolic_name') == 'hostname'
         if not six.PY3:
             self.command = self.command.encode('utf-8', 'ignore')
-        self.black_list = ['rm', 'kill', 'reboot', 'shutdown']
 
     def get_output(self):
         '''
         Execute a command through system shell. First checks to see if
         the requested command is executable. Returns (returncode, stdout, 0)
         '''
+        if self.is_hostname:
+            # short circuit for hostame with internal method
+            return determine_hostname()
+
         # all commands should timeout after a long interval so the client does not hang
         # prepend native nix 'timeout' implementation
-        timeout_command = 'timeout %s %s' % (self.config.cmd_timeout, self.command)
+        timeout_command = 'timeout -s KILL %s %s' % (
+            self.config.cmd_timeout, self.command)
 
         # ensure consistent locale for collected command output
-        cmd_env = {'LC_ALL': 'C'}
+        cmd_env = {'LC_ALL': 'C',
+                   'PATH': '/sbin:/bin:/usr/sbin:/usr/bin',
+                   'PYTHONPATH': os.getenv('PYTHONPATH')}
         args = shlex.split(timeout_command)
 
         # never execute this stuff
-        if set.intersection(set(args), set(self.black_list)):
-            raise RuntimeError("Command Blacklist")
+        if set.intersection(set(args), constants.command_blacklist):
+            raise RuntimeError("Command Blacklist: " + self.command)
 
         try:
             logger.debug('Executing: %s', args)
@@ -76,7 +77,7 @@ class InsightsCommand(InsightsSpec):
         dirty = False
 
         cmd = "sed -rf " + constants.default_sed_file
-        sedcmd = Popen(shlex_split(cmd),
+        sedcmd = Popen(shlex.split(cmd),
                        stdin=proc0.stdout,
                        stdout=PIPE)
         proc0.stdout.close()
@@ -84,10 +85,10 @@ class InsightsCommand(InsightsSpec):
 
         if self.exclude is not None:
             exclude_file = NamedTemporaryFile()
-            exclude_file.write("\n".join(self.exclude))
+            exclude_file.write("\n".join(self.exclude).encode('utf-8'))
             exclude_file.flush()
             cmd = "grep -F -v -f %s" % exclude_file.name
-            proc1 = Popen(shlex_split(cmd),
+            proc1 = Popen(shlex.split(cmd),
                           stdin=proc0.stdout,
                           stdout=PIPE)
             proc0.stdout.close()
@@ -107,7 +108,7 @@ class InsightsCommand(InsightsSpec):
             pattern_file.write("\n".join(self.pattern).encode('utf-8'))
             pattern_file.flush()
             cmd = "grep -F -f %s" % pattern_file.name
-            proc2 = Popen(shlex_split(cmd),
+            proc2 = Popen(shlex.split(cmd),
                           stdin=proc0.stdout,
                           stdout=PIPE)
             proc0.stdout.close()
@@ -152,20 +153,20 @@ class InsightsFile(InsightsSpec):
             return
 
         cmd = []
-        cmd.append('sed'.encode('utf-8'))
-        cmd.append('-rf'.encode('utf-8'))
-        cmd.append(constants.default_sed_file.encode('utf-8'))
-        cmd.append(self.real_path.encode('utf8'))
+        cmd.append('sed')
+        cmd.append('-rf')
+        cmd.append(constants.default_sed_file)
+        cmd.append(self.real_path)
         sedcmd = Popen(cmd,
                        stdout=PIPE)
 
         if self.exclude is not None:
             exclude_file = NamedTemporaryFile()
-            exclude_file.write("\n".join(self.exclude))
+            exclude_file.write("\n".join(self.exclude).encode('utf-8'))
             exclude_file.flush()
 
             cmd = "grep -v -F -f %s" % exclude_file.name
-            args = shlex_split(cmd)
+            args = shlex.split(cmd)
             proc = Popen(args, stdin=sedcmd.stdout, stdout=PIPE)
             sedcmd.stdout.close()
             stdin = proc.stdout
@@ -176,11 +177,11 @@ class InsightsFile(InsightsSpec):
 
         if self.pattern is not None:
             pattern_file = NamedTemporaryFile()
-            pattern_file.write("\n".join(self.pattern).encode())
+            pattern_file.write("\n".join(self.pattern).encode('utf-8'))
             pattern_file.flush()
 
             cmd = "grep -F -f %s" % pattern_file.name
-            args = shlex_split(cmd)
+            args = shlex.split(cmd)
             proc1 = Popen(args, stdin=sedcmd.stdout, stdout=PIPE)
             sedcmd.stdout.close()
 

@@ -138,18 +138,36 @@ class ListUnits(Parser):
 
     Example:
 
-        >>> conf = shared[ListUnits]
-        >>> conf.get_service_details('swap.target')
+        >>> units.get_service_details('swap.target')
         {'LOAD': 'loaded', 'ACTIVE': 'active', 'SUB': 'active', 'UNIT': 'swap.target'}
-        >>> conf.unit_list['swap.target']
+        >>> units.unit_list['swap.target']
         {'LOAD': 'loaded', 'ACTIVE': 'active', 'SUB': 'active', 'UNIT': 'swap.target'}
-        >>> conf.unit_list['random.service']
+        >>> units.is_active('swap.target')
+        True
+        >>> units.unit_list['random.service']
         {'LOAD': None, 'ACTIVE': None, 'SUB': None, 'UNIT': None}
     """
     def __init__(self, *args, **kwargs):
         self.unit_list = {}
         """dict: Dictionary service detail like active, running, exited, dead"""
         super(ListUnits, self).__init__(*args, **kwargs)
+
+    def parse_service_details(self, parts):
+        # man systemctl - "is-enabled" knows these states
+        valid_states = set(['invalid', 'loaded', 'inactive', 'active',
+                            'exited', 'running', 'failed', 'mounted', 'waiting', 'plugged'])
+
+        valid_units = set(['service', 'socket', 'device', 'mount', 'automount', 'swap', 'target',
+                           'path', 'timer', 'slice', 'scope'])
+
+        if any(part in valid_states for part in parts):
+            service_details = {}
+            service_details['LOAD'] = parts[1]
+            service_details['ACTIVE'] = parts[2]
+            service_details['SUB'] = parts[3]
+            if any(unit in parts[0] for unit in valid_units):
+                service_details['UNIT'] = parts[0]
+                return service_details
 
     def parse_content(self, content):
         """
@@ -158,24 +176,14 @@ class ListUnits(Parser):
         Args:
             content (context.content): Parser context content
         """
-        # 'static' means 'on' to fulfill dependency of something else that is on
-        # man systemctl - "is-enabled" knows these states
-        valid_states = set(['invalid', 'loaded', 'inactive', 'active',
-                            'exited', 'running', 'failed', 'mounted', 'waiting', 'plugged'])
-
-        valid_units = set(['service', 'socket', 'device', 'mount', 'automount', 'swap', 'target',
-                           'path', 'timer', 'slice', 'scope'])
-
+        BULLET_CHAR_U = u'\u25CF'
+        BULLET_CHAR_B = b"\xe2\x97\x8f"
         for line in get_active_lines(content):
             parts = line.split(None)  # AWK like split, strips whitespaces
-            if any(part in valid_states for part in parts):
-                service_details = {}
-                service_details['LOAD'] = parts[1]
-                service_details['ACTIVE'] = parts[2]
-                service_details['SUB'] = parts[3]
-                if any(unit in parts[0] for unit in valid_units):
-                    service_details['UNIT'] = parts[0]
-                    self.unit_list[parts[0]] = service_details
+            if parts[0] == BULLET_CHAR_U or parts[0].encode('utf-8') == BULLET_CHAR_B or parts[0] == '*':
+                self.unit_list[parts[1]] = self.parse_service_details(parts[1:])
+            else:
+                self.unit_list[parts[0]] = self.parse_service_details(parts)
 
     def get_service_details(self, service_name):
         """

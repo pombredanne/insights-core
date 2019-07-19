@@ -10,24 +10,30 @@ import yaml
 import six
 from fnmatch import fnmatch
 
-from insights.configtree import from_dict, iniconfig, Root, select, first
-from insights.configtree import Directive, SearchResult, Section
+from insights.parsr import iniparser
+from insights.parsr.query import (Directive, Entry, from_dict, Result, Section,
+                                  compile_queries)
 from insights.contrib.ConfigParser import RawConfigParser
 
-from insights.parsers import ParseException
+from insights.parsers import ParseException, SkipException
 from insights.core.plugins import ContentException
 from insights.core.serde import deserializer, serializer
+from . import ls_parser
 from insights.util import deprecated
 
 import sys
 # Since XPath expression is not supported by the ElementTree in Python 2.6,
 # import insights.contrib.ElementTree when running python is prior to 2.6 for compatibility.
 # Script insights.contrib.ElementTree is the same with xml.etree.ElementTree in Python 2.7.14
-# Otherwise, import xml.etree.ElementTree instead.
+# Otherwise, import defusedxml.ElementTree to avoid XML vulnerabilities,
+# if dependency not installed import xml.etree.ElementTree instead.
 if sys.version_info[0] == 2 and sys.version_info[1] <= 6:
     import insights.contrib.ElementTree as ET
 else:
-    import xml.etree.ElementTree as ET
+    try:
+        import defusedxml.ElementTree as ET
+    except:
+        import xml.etree.ElementTree as ET
 
 log = logging.getLogger(__name__)
 
@@ -78,12 +84,27 @@ class Parser(object):
         else:
             self.last_client_run = None
         self.args = context.args if hasattr(context, "args") else None
+        self._handle_content(context)
+
+    def _handle_content(self, context):
         self.parse_content(context.content)
 
     def parse_content(self, content):
         """This method must be implemented by classes based on this class."""
         msg = "Parser subclasses must implement parse_content(self, content)."
         raise NotImplementedError(msg)
+
+
+class StreamParser(Parser):
+    """
+    Parsers that don't have to store lines or look back in the data stream
+    should implement StreamParser instead of Parser as it is more memory
+    efficient. The only difference between StreamParser and Parser is that
+    StreamParser.parse_content will receive a generator instead of a list.
+    """
+
+    def _handle_content(self, context):
+        self.parse_content(context.stream())
 
 
 @serializer(Parser)
@@ -110,13 +131,23 @@ def find_main(confs, name):
 
 
 def flatten(docs, pred):
+    seen = set()
+    pred = compile_queries(pred)
+
     def inner(children):
         results = []
         for c in children:
-            if select(pred)([c]) and c.children:
+            if pred([c]) and c.children:
+                name = c.string_value
+                if name in seen:
+                    msg = "Configuration contains recursive includes: %s" % name
+                    raise Exception(msg)
+                seen.add(name)
                 results.extend(inner(c.children))
             else:
                 results.append(c)
+                if c.children:
+                    c.children = inner(c.children)
         return results
     return inner(docs)
 
@@ -236,32 +267,23 @@ class ConfigComponent(object):
 
     def find(self, *queries, **kwargs):
         """
-        Finds the first result found anywhere in the configuration. Pass
-        `one=last` for the last result. Returns `None` if no results are found.
+        Finds matching results anywhere in the configuration
         """
-        kwargs["deep"] = True
-        kwargs["roots"] = False
-        if "one" not in kwargs:
-            kwargs["one"] = first
-        return self.select(*queries, **kwargs)
+        roots = kwargs.get("roots", False)
+        return self.select(*queries, deep=True, roots=roots)
 
-    def find_all(self, *queries):
-        """
-        Find all results matching the query anywhere in the configuration.
-        Returns an empty `SearchResult` if no results are found.
-        """
-        return self.select(*queries, deep=True, roots=False)
+    find_all = find
 
     def _children_of_type(self, t):
         return [c for c in self.doc.children if isinstance(c, t)]
 
     @property
     def sections(self):
-        return SearchResult(children=self._children_of_type(Section))
+        return Result(children=self._children_of_type(Section))
 
     @property
     def directives(self):
-        return SearchResult(children=self._children_of_type(Directive))
+        return Result(children=self._children_of_type(Directive))
 
     def __getitem__(self, query):
         """
@@ -304,7 +326,7 @@ class ConfigComponent(object):
         return iter(self.doc)
 
     def __repr__(self):
-        return str(self.doc)
+        return repr(self.doc)
 
     def __str__(self):
         return self.__repr__()
@@ -313,13 +335,18 @@ class ConfigComponent(object):
 class ConfigParser(Parser, ConfigComponent):
     """
     Base Insights component class for Parsers of configuration files.
+
+    Raises:
+        SkipException: When input content is empty.
     """
     def parse_content(self, content):
+        if not content:
+            raise SkipException('Empty content.')
         self.content = content
         self.doc = self.parse_doc(content)
 
     def parse_doc(self, content):
-        raise NotImplemented()
+        raise NotImplementedError()
 
     def lineat(self, pos):
         return self.content[pos] if pos is not None else None
@@ -339,8 +366,8 @@ class ConfigCombiner(ConfigComponent):
         # Set the children of all include directives to the contents of the
         # included configs
         for conf in confs:
-            for node in conf.doc.select(include_finder, deep=True, roots=False):
-                pattern = node.value
+            for node in conf.find(include_finder):
+                pattern = node.string_value
                 if not pattern.startswith("/"):
                     pattern = os.path.join(server_root, pattern)
                 includes = self.find_matches(confs, pattern)
@@ -348,97 +375,11 @@ class ConfigCombiner(ConfigComponent):
                     node.children.extend(inc.doc.children)
 
         # flatten all content from nested includes into a main doc
-        self.doc = Root(children=flatten(self.main.doc.children, include_finder))
+        self.doc = Entry(children=flatten(self.main.doc.children, include_finder))
 
     def find_matches(self, confs, pattern):
         results = [c for c in confs if fnmatch(c.file_path, pattern)]
         return sorted(results, key=operator.attrgetter("file_name"))
-
-
-class SysconfigOptions(Parser):
-    """
-    A parser to handle the standard 'keyword=value' format of files in the
-    ``/etc/sysconfig`` directory.  These are provided in the standard 'data'
-    dictionary.
-
-    Examples:
-
-        >>> ntpconf = shared[NtpConf]
-        >>> 'OPTIONS' in ntpconf.data
-        True
-        >>> 'NOT_SET' in ntpconf.data
-        False
-        >>> 'COMMENTED_OUT' in ntpconf.data
-        False
-        >>> ntpconf.data['OPTIONS']
-        '-x -g'
-
-    For common variables such as OPTIONS, it is recommended to set a specific
-    property in the subclass that fetches this option with a fallback to a
-    default value.
-
-    Example subclass::
-
-        class DirsrvSysconfig(SysconfigOptions):
-
-            @property
-            def options(self):
-                return self.data.get('OPTIONS', '')
-    """
-
-    def parse_content(self, content):
-        result = {}
-        unparsed_lines = []
-
-        # Do not use get_active_lines, it strips comments within quotes
-        for line in content:
-            if not line or line.startswith('#'):
-                continue
-
-            try:
-                words = shlex.split(line)
-            except ValueError:
-                # Handle foo=bar # unpaired ' or " here
-                line, comment = line.split(' #', 1)
-                words = shlex.split(line)
-
-            # Either only one thing or line or rest starts with comment
-            # but either way we need to have an equals in the first word.
-            if (len(words) == 1 or (len(words) > 1 and words[1][0] == '#')) \
-                    and '=' in words[0]:
-                key, value = words[0].split('=', 1)
-                result[key] = value
-            # Only store lines if they aren't comments or blank
-            elif len(words) > 0 and words[0][0] != '#':
-                unparsed_lines.append(line)
-        self.data = result
-        self.unparsed_lines = unparsed_lines
-
-    def __getitem__(self, option):
-        """ Retrieves an item from the underlying data dictionary."""
-        return self.data[option]
-
-    def __contains__(self, option):
-        """ Does the underlying dictionary contain this option?"""
-        return option in self.data
-
-    def keys(self):
-        """ Return the list of keys (in no order) in the underlying dictionary."""
-        return self.data.keys()
-
-    def get(self, item, default=None):
-        """
-        Returns value of key ``item`` in self.data or ``default``
-        if key is not present.
-
-        Parameters:
-            item (str): Key to get from ``self.data``.
-            default (str): Default value to return if key is not present.
-
-        Returns:
-            (str): String value of the stored item, or the default if not found.
-        """
-        return self.data.get(item, default)
 
 
 class LegacyItemAccess(object):
@@ -499,6 +440,69 @@ class LegacyItemAccess(object):
         return self.data.get(item, default)
 
 
+class SysconfigOptions(Parser, LegacyItemAccess):
+    """
+    A parser to handle the standard 'keyword=value' format of files in the
+    ``/etc/sysconfig`` directory.  These are provided in the standard 'data'
+    dictionary.
+
+    Examples:
+
+        >>> 'OPTIONS' in ntpconf
+        True
+        >>> 'NOT_SET' in ntpconf
+        False
+        >>> 'COMMENTED_OUT' in ntpconf
+        False
+        >>> ntpconf['OPTIONS']
+        '-x -g'
+
+    For common variables such as OPTIONS, it is recommended to set a specific
+    property in the subclass that fetches this option with a fallback to a
+    default value.
+
+    Example subclass::
+
+        class DirsrvSysconfig(SysconfigOptions):
+
+            @property
+            def options(self):
+                return self.data.get('OPTIONS', '')
+    """
+
+    def parse_content(self, content):
+        result = {}
+        unparsed_lines = []
+
+        # Do not use get_active_lines, it strips comments within quotes
+        for line in content:
+            if not line or line.startswith('#'):
+                continue
+
+            try:
+                words = shlex.split(line)
+            except ValueError:
+                # Handle foo=bar # unpaired ' or " here
+                line, comment = line.split(' #', 1)
+                words = shlex.split(line)
+
+            # Either only one thing or line or rest starts with comment
+            # but either way we need to have an equals in the first word.
+            if (len(words) == 1 or (len(words) > 1 and words[1][0] == '#')) \
+                    and '=' in words[0]:
+                key, value = words[0].split('=', 1)
+                result[key] = value
+            # Only store lines if they aren't comments or blank
+            elif len(words) > 0 and words[0][0] != '#':
+                unparsed_lines.append(line)
+        self.data = result
+        self.unparsed_lines = unparsed_lines
+
+    def keys(self):
+        """ Return the list of keys (in no order) in the underlying dictionary."""
+        return self.data.keys()
+
+
 class CommandParser(Parser):
     """
     This class checks output from the command defined in the spec.
@@ -506,14 +510,19 @@ class CommandParser(Parser):
     included in the `bad_lines` list a `ContentException` is raised
     """
 
-    bad_lines = ["no such file or directory", "command not found"]
+    __bad_lines = [
+            "no such file or directory",
+            "command not found",
+            "no module named",
+    ]
     """
     This variable contains filters for bad responses from commands defined
     with command specs.
-    When adding a new lin to the list make sure text is all lower case.
+    When adding a new line to the list make sure text is all lower case.
     """
 
-    def validate_lines(self, results):
+    @staticmethod
+    def validate_lines(results, bad_lines):
         """
         If `results` contains a single line and that line is included
         in the `bad_lines` list, this function returns `False`. If no bad
@@ -529,18 +538,20 @@ class CommandParser(Parser):
 
         if results and len(results) == 1:
             first = results[0]
-            if any(l in first.lower() for l in self.bad_lines):
+            if any(l in first.lower() for l in bad_lines):
                 return False
         return True
 
-    def __init__(self, context):
+    def __init__(self, context, extra_bad_lines=[]):
         """
             This __init__ calls `validate_lines` function to check for bad lines.
             If `validate_lines` returns False, indicating bad line found, a
             ContentException is thrown.
         """
-
-        if not self.validate_lines(context.content):
+        valid_lines = self.validate_lines(context.content, self.__bad_lines)
+        if valid_lines and extra_bad_lines:
+            valid_lines = self.validate_lines(context.content, extra_bad_lines)
+        if not valid_lines:
             first = context.content[0] if context.content else "<no content>"
             name = self.__class__.__name__
             raise ContentException(name + ": " + first)
@@ -671,10 +682,20 @@ class YAMLParser(Parser, LegacyItemAccess):
     A parser class that reads YAML files.  Base your own parser on this.
     """
     def parse_content(self, content):
-        if type(content) is list:
-            self.data = yaml.safe_load('\n'.join(content))
-        else:
-            self.data = yaml.safe_load(content)
+        try:
+            if type(content) is list:
+                self.data = yaml.safe_load('\n'.join(content))
+            else:
+                self.data = yaml.safe_load(content)
+
+            if not isinstance(self.data, (dict, list)):
+                raise ParseException("YAML didn't produce a dictionary or list.")
+        except:
+            tb = sys.exc_info()[2]
+            cls = self.__class__
+            name = ".".join([cls.__module__, cls.__name__])
+            msg = "%s couldn't parse yaml." % name
+            six.reraise(ParseException, ParseException(msg), tb)
 
         self.doc = from_dict(self.data)
 
@@ -684,7 +705,15 @@ class JSONParser(Parser, LegacyItemAccess):
     A parser class that reads JSON files.  Base your own parser on this.
     """
     def parse_content(self, content):
-        self.data = json.loads(''.join(content))
+        try:
+            self.data = json.loads(''.join(content))
+        except:
+            tb = sys.exc_info()[2]
+            cls = self.__class__
+            name = ".".join([cls.__module__, cls.__name__])
+            msg = "%s couldn't parse json." % name
+            six.reraise(ParseException, ParseException(msg), tb)
+
         self.doc = from_dict(self.data)
 
 
@@ -811,21 +840,29 @@ class Scannable(six.with_metaclass(ScanMeta, Parser)):
 
 
 class LogFileOutput(six.with_metaclass(ScanMeta, Parser)):
-    """Class for parsing log file content.
+    """
+    Class for parsing log file content.
 
     Log file content is stored in raw format in the ``lines`` attribute.
 
-    Attributes:
-        lines (list): List of the lines from the log file content.
+    Assume the log file content is::
+
+        Log file line one
+        Log file line two
+        Log file line three, and more
 
     Examples:
         >>> class MyLogger(LogFileOutput):
         ...     pass
-        >>> contents = '''
-        Log file line one
-        Log file line two
-        Log file line three, and more
-        '''.strip()
+        >>> MyLogger.keep_scan('get_one', 'one')
+        >>> MyLogger.keep_scan('get_three_and_more', ['three', 'more'])
+        >>> MyLogger.keep_scan('get_one_or_two', ['one', 'two'], check=any)
+        >>> MyLogger.last_scan('last_line_contains_file', 'file')
+        >>> MyLogger.keep_scan('last_2_lines_contain_file', 'file', num=2, reverse=True)
+        >>> MyLogger.keep_scan('last_3_lines_contain_line_and_t', ['line', 't'], num=3, reverse=True)
+        >>> MyLogger.token_scan('find_more', 'more')
+        >>> MyLogger.token_scan('find_four_and_more', ['four', 'more'])
+        >>> MyLogger.token_scan('find_four_or_more', ['four', 'more'], check=any)
         >>> my_logger = MyLogger(context_wrap(contents, path='/var/log/mylog'))
         >>> my_logger.file_path
         '/var/log/mylog'
@@ -833,12 +870,32 @@ class LogFileOutput(six.with_metaclass(ScanMeta, Parser)):
         'mylog'
         >>> my_logger.get('two')
         [{'raw_message': 'Log file line two'}]
-        >>> 'three' in my_logger
+        >>> 'line three,' in my_logger
         True
         >>> my_logger.get(['three', 'more'])
         [{'raw_message': 'Log file line three, and more'}]
         >>> my_logger.lines[0]
         'Log file line one'
+        >>> my_logger.get_one
+        [{'raw_message': 'Log file line one'}]
+        >>> my_logger.get_three_and_more == my_logger.get(['three', 'more'])
+        True
+        >>> my_logger.last_line_contains_file
+        {'raw_message': 'Log file line three, and more'}
+        >>> len(my_logger.last_2_lines_contain_file)
+        2
+        >>> len(my_logger.last_3_lines_contain_line_and_t)  # Only 2 lines contain 'line' and 't'
+        2
+        >>> my_logger.find_more
+        True
+        >>> my_logger.find_four_and_more
+        False
+        >>> my_logger.find_four_or_more
+        True
+
+    Attributes:
+        lines (list): List of the lines from the log file content.
+
     """
 
     time_format = '%Y-%m-%d %H:%M:%S'
@@ -857,15 +914,17 @@ class LogFileOutput(six.with_metaclass(ScanMeta, Parser)):
         Use all the defined scanners to search the log file, setting the
         properties defined in the scanner.
         """
-        self.lines = list(content)
+        self.lines = content
         for scanner in self.scanners:
             scanner(self)
 
     def __contains__(self, s):
         """
-        Returns true if any line contains the given text string.
+        Return ``True`` if any line contains the given text string or all the
+        strings in the given list.
         """
-        return any(s in l for l in self.lines)
+        search_by_expression = self._valid_search(s)
+        return any(search_by_expression(l) for l in self.lines)
 
     def _parse_line(self, line):
         """
@@ -874,7 +933,7 @@ class LogFileOutput(six.with_metaclass(ScanMeta, Parser)):
         """
         return {'raw_message': line}
 
-    def _valid_search(self, s):
+    def _valid_search(self, s, check=all):
         """
         Check this given `s`, it must be a string or a list of strings.
         Otherwise, a TypeError will be raised.
@@ -883,29 +942,39 @@ class LogFileOutput(six.with_metaclass(ScanMeta, Parser)):
             return lambda l: s in l
         elif (isinstance(s, list) and len(s) > 0 and
               all(isinstance(w, six.string_types) for w in s)):
-            return lambda l: all(w in l for w in s)
+            return lambda l: check(w in l for w in s)
         elif s is not None:
             raise TypeError('Search items must be given as a string or a list of strings')
 
-    def get(self, s):
+    def get(self, s, check=all, num=None, reverse=False):
         """
         Returns all lines that contain `s` anywhere and wrap them in a list of
         dictionaries.  `s` can be either a single string or a string list. For
         list, all keywords in the list must be found in each line.
 
         Parameters:
-            s(str or list): one or more strings to search for.
+            s(str or list): one or more strings to search for
+            check(func): built-in function ``all`` or ``any`` applied to each line
+            num(int): the number of lines to get, ``None`` for unlimited
+            reverse(bool): scan start from the head when ``False`` by default, otherwise start from the tail
 
         Returns:
-            (list): list of dictionaries corresponding to the parsed lines
-            contain the `s`.
+            (list): list of dictionaries corresponding to the parsed lines contain the `s`.
+
+        Raises:
+            TypeError: When `s` is not a string or a list of strings, or `num`
+                is not an integer.
         """
+        if num is not None and not isinstance(num, six.integer_types):
+            raise TypeError('Required numbers must be given as a integer')
         ret = []
-        search_by_expression = self._valid_search(s)
-        for l in self.lines:
-            if search_by_expression(l):
+        search_by_expression = self._valid_search(s, check)
+        lines = self.lines[::-1] if reverse else self.lines
+        for l in lines:
+            if (num is None or len(ret) < num) and search_by_expression(l):
                 ret.append(self._parse_line(l))
-        return ret
+        # re-sort to original order
+        return ret[::-1] if reverse else ret
 
     @classmethod
     def scan(cls, result_key, func):
@@ -913,6 +982,9 @@ class LogFileOutput(six.with_metaclass(ScanMeta, Parser)):
         Define computed fields based on a string to "grep for".  This is
         preferred to utilizing raw log lines in plugins because computed fields
         will be serialized, whereas raw log lines will not.
+
+        Raises:
+            ValueError: When `result_key` is already a registered scanner key.
         """
 
         if result_key in cls.scanner_keys:
@@ -926,24 +998,65 @@ class LogFileOutput(six.with_metaclass(ScanMeta, Parser)):
         cls.scanner_keys.add(result_key)
 
     @classmethod
-    def token_scan(cls, result_key, token):
+    def token_scan(cls, result_key, token, check=all, reverse=False):
         """
         Define a property that is set to true if the given token is found in
         the log file.  Uses the __contains__ method of the log file.
+
+        Parameters:
+            result_key(str): the scanner key to register
+            token(str or list): one or more strings to search for
+            check(func): built-in function ``all`` or ``any`` applied to each line
+            reverse(bool): scan start from the head when ``False`` by default, otherwise start from the tail
+
+        Returns:
+            (list): list of dictionaries corresponding to the parsed lines contain the `token`.
         """
         def _scan(self):
-            return token in self
+            search_by_expression = self._valid_search(token, check)
+            lines = self.lines[::-1] if reverse else self.lines
+            return any(search_by_expression(l) for l in lines)
 
         cls.scan(result_key, _scan)
 
     @classmethod
-    def keep_scan(cls, result_key, token):
+    def keep_scan(cls, result_key, token, check=all, num=None, reverse=False):
         """
-        Define a property that is set to the list of lines that contain the
-        given token.  Uses the get method of the log file.
+        Define a property that is set to the list of dictionaries of the lines
+        that contain the given token.  Uses the get method of the log file.
+
+        Parameters:
+            result_key(str): the scanner key to register
+            token(str or list): one or more strings to search for
+            check(func): built-in function ``all`` or ``any`` applied to each line
+            num(int): the number of lines to get, ``None`` for unlimited
+            reverse(bool): scan start from the head when ``False`` by default, otherwise start from the tail
+
+        Returns:
+            (list): list of dictionaries corresponding to the parsed lines contain the `token`.
         """
         def _scan(self):
-            return self.get(token)
+            return self.get(token, check=check, num=num, reverse=reverse)
+
+        cls.scan(result_key, _scan)
+
+    @classmethod
+    def last_scan(cls, result_key, token, check=all):
+        """
+        Define a property that is set to the dictionary of the last line
+        that contains the given token.  Uses the get method of the log file.
+
+        Parameters:
+            result_key(str): the scanner key to register
+            token(str or list): one or more strings to search for
+            check(func): built-in function ``all`` or ``any`` applied to each line
+
+        Returns:
+            (dict): dictionary corresponding to the last parsed line contains the `token`.
+        """
+        def _scan(self):
+            ret = self.get(token, check=check, num=1, reverse=True)
+            return ret[0] if ret else dict()
 
         cls.scan(result_key, _scan)
 
@@ -1150,21 +1263,6 @@ class Syslog(LogFileOutput):
     It is best to use filters and/or scanners with the messages log, to speed up
     parsing.  These work on the raw message, before being parsed.
 
-    Examples:
-
-        >>> Syslog.filters.append('wrapper')
-        >>> Syslog.token_scan('daemon_start', 'Wrapper Started as Daemon')
-        >>> msgs = shared[Syslog]
-        >>> len(msgs.lines)
-        >>> wrapper_msgs = msgs.get('wrapper') # Can only rely on lines filtered being present
-        >>> wrapper_msgs[0]
-        {'timestamp': 'May 18 15:13:36', 'hostname': 'lxc-rhel68-sat56',
-         'procname': wrapper[11375]', 'message': '--> Wrapper Started as Daemon',
-         'raw_message': 'May 18 15:13:36 lxc-rhel68-sat56 wrapper[11375]: --> Wrapper Started as Daemon'
-        }
-        >>> msgs.daemon_start # Token set if matching lines present in logs
-        True
-
     Sample log lines::
 
         May 18 15:13:34 lxc-rhel68-sat56 jabberd/sm[11057]: session started: jid=rhn-dispatcher-sat@lxc-rhel6-sat56.redhat.com/superclient
@@ -1172,6 +1270,25 @@ class Syslog(LogFileOutput):
         May 18 15:13:36 lxc-rhel68-sat56 wrapper[11375]: Launching a JVM...
         May 18 15:24:28 lxc-rhel68-sat56 yum[11597]: Installed: lynx-2.8.6-27.el6.x86_64
         May 18 15:36:19 lxc-rhel68-sat56 yum[11954]: Updated: sos-3.2-40.el6.noarch
+
+    Examples:
+        >>> Syslog.token_scan('daemon_start', 'Wrapper Started as Daemon')
+        >>> Syslog.token_scan('yum_updated', ['yum', 'Updated'])
+        >>> Syslog.keep_scan('yum_lines', 'yum')
+        >>> Syslog.keep_scan('yum_installed_lines', ['yum', 'Installed'])
+        >>> syslog.get('wrapper')[0]
+        {'timestamp': 'May 18 15:13:36', 'hostname': 'lxc-rhel68-sat56',
+         'procname': wrapper[11375]', 'message': '--> Wrapper Started as Daemon',
+         'raw_message': 'May 18 15:13:36 lxc-rhel68-sat56 wrapper[11375]: --> Wrapper Started as Daemon'
+        }
+        >>> syslog.daemon_start
+        True
+        >>> syslog.yum_updated
+        True
+        >>> len(syslog.yum_lines)
+        2
+        >>> len(syslog.yum_updated_lines)
+        1
 
     .. note::
         Because syslog timestamps by default have no year,
@@ -1198,10 +1315,29 @@ class Syslog(LogFileOutput):
 
             info_splits = info.split()
             if len(info_splits) == 5:
-                msg_info['timestamp'] = ' '.join(info_splits[:3])
+                logstamp = ' '.join(info_splits[:3])
+                try:
+                    datetime.datetime.strptime(logstamp, self.time_format)
+                except ValueError:
+                    return msg_info
+                msg_info['timestamp'] = logstamp
                 msg_info['hostname'] = info_splits[3]
                 msg_info['procname'] = info_splits[4]
         return msg_info
+
+    def get_logs_by_procname(self, proc):
+        """
+        Parameters:
+            proc(str): The process or facility that you're looking for
+
+        Yields:
+            (dict): The parsed syslog messages produced by that process or facility
+        """
+        for line in self.lines:
+            l = self._parse_line(line)
+            procid = l.get('procname', '')
+            if proc == procid or proc == procid.split('[')[0]:
+                yield l
 
 
 class IniConfigFile(ConfigParser):
@@ -1278,7 +1414,7 @@ class IniConfigFile(ConfigParser):
         self.data = config
 
     def parse_doc(self, content):
-        return iniconfig.parse_doc(content)
+        return iniparser.parse_doc("\n".join(content), self)
 
     def sections(self):
         """list: Return a list of section names."""
@@ -1356,7 +1492,7 @@ class FileListing(Parser):
         ``/etc/yum/repos/d``.  Use caution in checking the paths when
         requesting single directories.
 
-    Parses SELinux directory listings if the 'selinux' option is True.
+    Parses the SELinux information if present in the listing.
     SELinux directory listings contain:
 
     * the type of file
@@ -1376,11 +1512,13 @@ class FileListing(Parser):
         | crw-------.  1 0 0 10,  236 Jul 25 10:00 control
 
     Examples:
-        >>> '/example_dir' in shared[FileListing]
+        >>> file_listing
+        <insights.core.FileListing at 0x7f5319407450>
+        >>> '/example_dir' in file_listing
         True
-        >>> shared[FileListing].dir_contains('/example_dir', 'menu.lst')
+        >>> file_listing.dir_contains('/example_dir', 'menu.lst')
         True
-        >>> dir = shared[FileListing].listing_of('/example_dir')
+        >>> dir = file_listing.listing_of('/example_dir')
         >>> dir['.']['type']
         'd'
         >>> dir['config-3.10.0-229.14.q.el7.x86_64']['size']
@@ -1391,41 +1529,7 @@ class FileListing(Parser):
         './grub.conf'
     """
 
-    # I know I'm missing some types in the 'type' subexpression...
-    # Modify the last '\S+' to '\S*' to match where there is no '.' at the end
-    perms_regex = r'^(?P<type>[bcdlps-])' +\
-        r'(?P<perms>[r-][w-][sSx-][r-][w-][sSx-][r-][w-][xsSt-]([.+-])?)'
-    links_regex = r'(?P<links>\d+)'
-    owner_regex = r'(?P<owner>[a-zA-Z0-9_-]+)\s+(?P<group>[a-zA-Z0-9_-]+)'
-    # In 'size' we also cope with major, minor format character devices
-    # by just catching the \d+, and then splitting it off later.
-    size_regex = r'(?P<size>(?:\d+,\s+)?\d+)'
-    # Note that we don't try to determine nonexistent month, day > 31, hour
-    # > 23, minute > 59 or improbable year here.
-    # TODO: handle non-English formatted dates here.
-    date_regex = r'(?P<date>\w{3}\s[ 0-9][0-9]\s(?:[012]\d:\d{2}|\s\d{4}))'
-    name_regex = r'(?P<name>[^/ ][^/]*?)(?: -> (?P<link>\S.*))?$'
-    normal_regex = '\s+'.join((perms_regex, links_regex, owner_regex,
-                              size_regex, date_regex, name_regex))
-    normal_re = re.compile(normal_regex)
-
-    context_regex = r'(?P<se_user>\w+_u):(?P<se_role>\w+_r):' +\
-        r'(?P<se_type>\w+_t):(?P<se_mls>\S+)'
-    selinux_regex = '\s+'.join((perms_regex, owner_regex, context_regex,
-                               name_regex))
-    selinux_re = re.compile(selinux_regex)
-
-    def __init__(self, context, selinux=False):
-        """
-            You can set the 'selinux' parameter to True to have this
-            directory listing parsed as a 'ls -Z' directory listing.
-        """
-        self.selinux = selinux
-        # Pick the right regex to use and save that as a property
-        if selinux:
-            self.file_re = self.selinux_re
-        else:
-            self.file_re = self.normal_re
+    def __init__(self, context):
         # Try to pull out the directory path from the command line, in case
         # we're doing an ls on only one directory (which then doesn't list
         # the directory name in the output).  Obviously if we don't have the
@@ -1439,89 +1543,13 @@ class FileListing(Parser):
             self.first_path = '/' if not fpath else fpath.replace('.', '/').replace('_', ' ')
         super(FileListing, self).__init__(context)
 
-    def parse_file_match(self, this_dir, line):
-        # Save all the raw directory entries, even if we can't parse them
-        this_dir['raw_list'].append(line)
-        match = self.file_re.search(line)
-        if not match:
-            # Can't do anything more with the line here
-            return
-
-        # Get the fields from the regex
-        this_file = match.groupdict()
-        this_file['raw_entry'] = line
-        this_file['dir'] = this_dir['name']
-        typ = match.group('type')
-
-        # There's a bunch of stuff that the SELinux listing doesn't contain:
-        if not self.selinux:
-            # Type conversions
-            this_file['links'] = int(this_file['links'])
-            # Is this a character or block device?  If so, it should
-            # have a major, minor 'size':
-            size = match.group('size')
-            if typ in 'bc':
-                # What should we do if we expect a major, minor size but
-                # don't get one?
-                if ',' in size:
-                    major, minor = match.group('size').split(',')
-                    this_file['major'] = int(major.strip())
-                    this_file['minor'] = int(minor.strip())
-                    # Remove other 'size' entries
-                    del(this_file['size'])
-            else:
-                # What should we do if we get a comma here?
-                if ',' not in size:
-                    this_file['size'] = int(match.group('size'))
-
-        # If this is not a symlink, remove the link key
-        if not this_file['link']:
-            del this_file['link']
-        # Now add it to our various properties
-        file_name = this_file['name']
-        this_dir['entries'][file_name] = this_file
-        if typ in 'bc':
-            this_dir['specials'].append(file_name)
-        if typ == 'd':
-            this_dir['dirs'].append(file_name)
-        else:
-            this_dir['files'].append(file_name)
-
     def parse_content(self, content):
         """
         Called automatically to process the directory listing(s) contained in
         the content.
         """
-        listings = {}
-        this_dir = {}
-        for line in content:
-            l = line.strip()
-            if not l:
-                continue
-            if (l.startswith('/') and l.endswith(':')) or (self.first_path):
-                # Directory name from output first and context path second
-                if (l.startswith('/') and l.endswith(':')):
-                    name = l[:-1]
-                else:
-                    name = self.first_path
-                # Unset the first path so we don't come here again.
-                self.first_path = None
-                # New structures for a new directory
-                this_dir = {'entries': {}, 'files': [], 'dirs': [],
-                            'specials': [], 'total': 0, 'raw_list': [],
-                            'name': name}
-                listings[name] = this_dir
-            elif l.startswith('total') and l[6:].isdigit():
-                this_dir['total'] = int(l[6:])
-            elif not this_dir:
-                # This state can happen if processing an archive that filtered
-                # a file listing due to an old spec definition.
-                # Let's just skip these lines.
-                continue
-            else:
-                self.parse_file_match(this_dir, l)
+        self.listings = ls_parser.parse(content, self.first_path)
 
-        self.listings = listings
         # No longer need the first path found, if any.
         delattr(self, 'first_path')
 
@@ -1595,12 +1623,6 @@ class FileListing(Parser):
         if name not in self.listings[directory]['entries']:
             return None
         return self.listings[directory]['entries'][name]
-
-    def raw_directory(self, directory):
-        """
-        The list of raw lines from the directory, as is.
-        """
-        return self.listings[directory]['raw_list']
 
 
 class AttributeDict(dict):

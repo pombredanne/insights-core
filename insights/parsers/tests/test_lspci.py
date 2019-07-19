@@ -1,5 +1,7 @@
-from insights.parsers.lspci import LsPci, LsPciDriver
+from insights.parsers import lspci
+from insights.parsers.lspci import LsPci
 from insights.tests import context_wrap
+import doctest
 
 
 LSPCI_0 = """
@@ -183,8 +185,37 @@ Ethernet controller: Intel Corporation 82598EB 10-Gigabit AF Dual Port Network C
 VGA compatible controller: Matrox Electronics Systems Ltd:MGA G200e [Pilot] ServerEngines (SEP1) (rev 02)
 """.strip()
 
+LSPCI_DRIVER_DOC = """
+00:00.0 Host bridge: Intel Corporation 5500 I/O Hub to ESI Port (rev 13)
+        Subsystem: Cisco Systems Inc Device 0101
+00:01.0 PCI bridge: Intel Corporation 5520/5500/X58 I/O Hub PCI Express Root Port 1 (rev 13)
+        Kernel driver in use: pcieport
+        Kernel modules: shpchp
+00:02.0 PCI bridge: Intel Corporation 5520/5500/X58 I/O Hub PCI Express Root Port 2 (rev 13)
+        Kernel driver in use: pcieport
+        Kernel modules: shpchp
+03:00.0 Network controller: Intel Corporation Centrino Advanced-N 6205 [Taylor Peak] (rev 34)
+        Subsystem: Cisco Systems Inc Device 004a
+        Kernel driver in use: ixgbe
+        Kernel modules: ixgbe
+06:00.0 Ethernet controller: Intel Corporation 82598EB 10-Gigabit AF Dual Port Network Connection (rev 01)
+        Subsystem: Cisco Systems Inc Device 004a
+        Kernel driver in use: ixgbe
+        Kernel modules: ixgbe
+""".strip()
+
+LSPCI_OUTPUT_WITH_BAD_LINES = """
+03:00.0 Network controller: Intel Corporation Wireless 7260 (rev bb)
+        Subsystem: Intel Corporation Dual Band Wireless-AC 7260
+
+        Kernel driver in use: iwlwifi
+# a comment
+        Kernel modules: iwlwifi
+""".strip()
+
 
 def test_lspci():
+    LsPci.token_scan('centrino', 'Centrino')
     lspci_0 = LsPci(context_wrap(LSPCI_0))
     assert [i['raw_message'] for i in lspci_0.get("Intel Corporation")] == INTEL.splitlines()
     assert len(lspci_0.get("Network controller")) == 1
@@ -198,20 +229,32 @@ def test_lspci():
 
 
 def test_lspci_driver():
-    lspci_obj = LsPciDriver(context_wrap(LSPCI_DRIVER_DETAILS))
+    lspci_obj = LsPci(context_wrap(LSPCI_DRIVER_DETAILS))
     assert len(lspci_obj.data) == 44
     dev_info = lspci_obj.pci_dev_details('00:01.0')
     assert len(dev_info) == 3
     assert dev_info['Kernel driver in use'] == 'pcieport'
     assert len(lspci_obj.pci_dev_list) == 44
 
-    lspci_obj = LsPciDriver(context_wrap(LSPCI_DRIVER_DETAILS_2))
+    lspci_obj = LsPci(context_wrap(LSPCI_DRIVER_DETAILS_2))
     assert len(lspci_obj.data) == 4
     dev_info = lspci_obj.pci_dev_details('04:00.0')
     assert len(dev_info) == 1
     assert 'Kernel driver in use' not in dev_info
     assert len(lspci_obj.pci_dev_list) == 4
 
-    lspci_obj = LsPciDriver(context_wrap(LSPCI_DRIVER_DETAILS_3))
+    lspci_obj = LsPci(context_wrap(LSPCI_DRIVER_DETAILS_3))
     assert len(lspci_obj.data) == 0
     assert len(lspci_obj.pci_dev_list) == 0
+
+    output = LsPci(context_wrap(LSPCI_OUTPUT_WITH_BAD_LINES))
+    assert len(output.data) == 1
+    assert len(output.pci_dev_list) == 1
+
+
+def test_doc_examples():
+    env = {
+            'lspci': LsPci(context_wrap(LSPCI_DRIVER_DOC))
+          }
+    failed, total = doctest.testmod(lspci, globs=env)
+    assert failed == 0

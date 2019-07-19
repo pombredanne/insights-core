@@ -1,5 +1,29 @@
+"""
+Parsers for RabbitMQ
+====================
+
+Parsers included in this module are:
+
+RabbitMQReport - command ``/usr/sbin/rabbitmqctl report``
+---------------------------------------------------------
+
+RabbitMQReportOfContainers - files ``docker_exec_-t_rabbitmq-bundle-docker-*_rabbitmqctl_report``
+-------------------------------------------------------------------------------------------------
+
+RabbitMQUsers - command ``/usr/sbin/rabbitmqctl list_users``
+------------------------------------------------------------
+
+RabbitMQQueues - command ``/usr/sbin/rabbitmqctl list_queues name messages consumers auto_delete``
+--------------------------------------------------------------------------------------------------
+
+RabbitMQEnv - file ``/etc/rabbitmq/rabbitmq-env.conf``
+------------------------------------------------------
+"""
+from re import compile
+
 from collections import namedtuple
 from insights.contrib import pyparsing as p
+from insights.core import SysconfigOptions
 from .. import parser, CommandParser
 from . import ParseException
 from insights.specs import Specs
@@ -14,7 +38,7 @@ def erlblock_parser():
 
     key = p.Word(p.alphas + '_')
     value_tnum = p.Word(p.nums + '.')
-    value_tword = p.Word(p.alphanums + '/"-[]:.()')
+    value_tword = p.Word(p.alphanums + '/"-[]:.()\\')
     value_tstr = p.OneOrMore(value_tword)
     value_tdoustrs = value_tstr + COMMA + value_tstr
     value_tnumstr = value_tnum + value_tstr
@@ -71,51 +95,52 @@ def create_parser():
 class RabbitMQReport(CommandParser):
 
     def parse_content(self, content):
+        """Support StatusOfNode and Permissions Sections only.
+
+        Attrbutes:
+            results(dict): None if encountered an error while parsing. For example::
+
+                self.result =
+                {'nstat': {
+                    "'rabbit@overcloud-controller-0'": {
+                        'file_descriptors': {
+                            'total_used': '967',
+                            'sockets_used': '965',
+                            'total_limit': '3996',
+                            'sockets_limit': '3594'},
+                        'uptime': '3075485',
+                        'pid': '6005',
+                        'disk_free': '259739344896',
+                        'disk_free_limit': '50000000'},
+                    "'rabbit@overcloud-controller-1'": {
+                        'file_descriptors': {
+                            'total_used': '853',
+                            'sockets_used': '851',
+                            'total_limit': '3996',
+                            'sockets_limit': '3594'},
+                        'uptime': '3075482',
+                        'pid': '9304',
+                        'disk_free': '260561866752',
+                        'disk_free_limit': '50000000'}}
+                 'perm': {
+                    '/': {
+                        'redhat1': ['redhat.*', '.*', '.*'],
+                        'guest': ['.*', '.*', '.*'],
+                        'redhat':['redhat.*', '.*', '.*']},
+                    'test_vhost': ''}}
         """
-        Support StatusOfNode and Permissions Sections only
-        IF encounter any Error in parsing, self.result = None;
-        Otherwise, parsing result stored in self.result as Dict.
+        # During the below parsing process, p.ParseException might be thrown.
+        # No handler will be applied here.
+        # And such p.ParseException won't be hidden, showing for debug usage.
+        self.result = create_parser().parseString("\n".join(content)).asDict()
 
-        self.result =
-        {'nstat': {
-            "'rabbit@overcloud-controller-0'": {
-                'file_descriptors': {
-                    'total_used': '967',
-                    'sockets_used': '965',
-                    'total_limit': '3996',
-                    'sockets_limit': '3594'},
-                'uptime': '3075485',
-                'pid': '6005',
-                'disk_free': '259739344896',
-                'disk_free_limit': '50000000'},
-            "'rabbit@overcloud-controller-1'": {
-                'file_descriptors': {
-                    'total_used': '853',
-                    'sockets_used': '851',
-                    'total_limit': '3996',
-                    'sockets_limit': '3594'},
-                'uptime': '3075482',
-                'pid': '9304',
-                'disk_free': '260561866752',
-                'disk_free_limit': '50000000'}}
-         'perm': {
-            '/': {
-                'redhat1': ['redhat.*', '.*', '.*'],
-                'guest': ['.*', '.*', '.*'],
-                'redhat':['redhat.*', '.*', '.*']},
-            'test_vhost': ''}}
 
-        fd_total_limit can be get by:
-            self.result.get("nstat").get(NODENAME).\
-                    get("file_descriptors").get("total_limit")
-
-        permissions can be get by:
-            self.result.get("perm")
-        """
-        try:
-            self.result = create_parser().parseString("\n".join(content)).asDict()
-        except p.ParseException:
-            self.result = None
+@parser(Specs.rabbitmq_report_of_containers)
+class RabbitMQReportOfContainers(RabbitMQReport):
+    """
+    Parse the `rabbitmqctl report` command of each container running on the host.
+    """
+    pass
 
 
 @parser(Specs.rabbitmq_users)
@@ -156,13 +181,13 @@ class RabbitMQQueues(CommandParser):
         cinder-scheduler_fanout_b7a2e488f3ed4e1587b959f9ac255b93        8141    0   true
 
     Examples:
-    >>> queues = shared[RabbitMQQueues]
-    >>> queues.data[0]
-    QueueInfo(name='cinder-scheduler', messages=0, consumers=3, auto_delete=False)
-    >>> queues.data[0].name
-    'cinder-scheduler'
-    >>> queues.data[1].name
-    'cinder-scheduler.ha-controller'
+
+        >>> queues.data[0]
+        QueueInfo(name='cinder-scheduler', messages=0, consumers=3, auto_delete=False)
+        >>> queues.data[0].name
+        'cinder-scheduler'
+        >>> queues.data[1].name
+        'cinder-scheduler.ha-controller'
 
     Raises:
         ParseException: Raised if the data indicates an error in acquisition or if
@@ -192,3 +217,44 @@ class RabbitMQQueues(CommandParser):
                         "auto_delete should be true or false: {0}".format(line))
             else:
                 raise ParseException("Data appears invalid: {0}".format(line))
+
+
+@parser(Specs.rabbitmq_env)
+class RabbitMQEnv(SysconfigOptions):
+    """Parse the content of file ``/etc/rabbitmq/rabbitmq-env.conf`` using
+    the ``SysconfigOptions`` base class.
+
+
+    Sample content of the file ``/etc/rabbitmq/rabbitmq-env.conf``::
+
+        RABBITMQ_SERVER_ERL_ARGS="+K true +P 1048576 -kernel inet_default_connect_options [{nodelay,true},{raw,6,18,<<5000:64/native>>}] -kernel inet_default_listen_options [{raw,6,18,<<5000:64/native>>}]"
+
+    Example:
+
+        >>> rabbitmq_env.rabbitmq_server_erl_args
+        '+K true +P 1048576 -kernel inet_default_connect_options [{nodelay,true},{raw,6,18,<<5000:64/native>>}] -kernel inet_default_listen_options [{raw,6,18,<<5000:64/native>>}]'
+        >>> rabbitmq_env.data['RABBITMQ_SERVER_ERL_ARGS']
+        '+K true +P 1048576 -kernel inet_default_connect_options [{nodelay,true},{raw,6,18,<<5000:64/native>>}] -kernel inet_default_listen_options [{raw,6,18,<<5000:64/native>>}]'
+        >>> rabbitmq_env.rmq_erl_tcp_timeout
+        '5000'
+
+    Attributes:
+        rabbitmq_server_erl_args(str): If RABBITMQ_SERVER_ERL_ARGS otherwise ``None``.
+
+        rmq_erl_tcp_timeout(str): If value of inet_default_connect_options equals value of inet_default_listen_options. Otherwise ``None``.
+    """
+    @property
+    def rabbitmq_server_erl_args(self):
+        return self.data.get('RABBITMQ_SERVER_ERL_ARGS', None)
+
+    @property
+    def rmq_erl_tcp_timeout(self):
+        pattern_connect_options = compile(r"inet_default_connect_options.*?\<<([0-9]*)\:64")
+        pattern_listen_options = compile(r"inet_default_listen_options.*?\<<([0-9]*)\:64")
+
+        if self.rabbitmq_server_erl_args:
+            if pattern_connect_options.search(self.rabbitmq_server_erl_args) and pattern_listen_options.search(self.rabbitmq_server_erl_args):
+                connect_timeout = pattern_connect_options.findall(self.rabbitmq_server_erl_args)[0]
+                listen_timeout = pattern_listen_options.findall(self.rabbitmq_server_erl_args)[0]
+                if connect_timeout == listen_timeout:
+                    return connect_timeout

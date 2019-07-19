@@ -1,21 +1,57 @@
 from __future__ import print_function
 import copy
+import inspect
 import itertools
 import json
 import logging
 import six
 import six.moves
+from collections import defaultdict
+from functools import wraps
+from operator import eq
 
 try:
     from StringIO import StringIO
 except ImportError:
     from io import StringIO
 
+import insights
 from insights import apply_filters
-from insights.core import dr
+from insights.core import dr, filters
 from insights.core.context import Context
-from insights.core.spec_factory import ContentProvider
+from insights.core.spec_factory import RegistryPoint
 from insights.specs import Specs
+
+
+# we intercept the add_filter call during integration testing so we can ensure
+# that rules add filters to datasources that *should* be filterable
+ADDED_FILTERS = defaultdict(set)
+add_filter = filters.add_filter
+
+
+def _intercept(func):
+    @wraps(func)
+    def inner(ds, pattern):
+        ret = add_filter(ds, pattern)
+        calling_module = inspect.stack()[1][0].f_globals.get("__name__")
+        ADDED_FILTERS[calling_module].add(ds)
+        return ret
+    return inner
+
+
+filters.add_filter = _intercept(filters.add_filter)
+insights.add_filter = _intercept(insights.add_filter)
+
+
+def _get_registry_points(component):
+    results = set()
+    for c in dr.walk_tree(component):
+        try:
+            if isinstance(c, RegistryPoint):
+                results.add(c)
+        except:
+            pass
+    return results
 
 
 logger = logging.getLogger(__name__)
@@ -28,10 +64,9 @@ DEFAULT_RELEASE = "Red Hat Enterprise Linux Server release 7.2 (Maipo)"
 DEFAULT_HOSTNAME = "hostname.example.com"
 
 
-def unordered_compare(result, expected):
+def deep_compare(result, expected):
     """
-    Deep compare rule reducer results when testing.  Developed to find
-    arbitrarily nested lists and remove differences based on ordering.
+    Deep compare rule reducer results when testing.
     """
     logger.debug("--Comparing-- (%s) %s to (%s) %s", type(result), result, type(expected), expected)
 
@@ -39,19 +74,7 @@ def unordered_compare(result, expected):
         assert result["type"] == "skip", result
         return
 
-    if not all(isinstance(o, six.string_types) for o in (result, expected)):
-        assert type(result) == type(expected)
-
-    if isinstance(result, list):
-        assert len(result) == len(expected)
-        for left_item, right_item in six.moves.zip(sorted(result), sorted(expected)):
-            unordered_compare(left_item, right_item)
-    elif isinstance(result, dict):
-        assert len(result) == len(expected)
-        for item_key in result:
-            unordered_compare(result[item_key], expected[item_key])
-    else:
-        assert result == expected
+    assert eq(result, expected)
 
 
 def run_input_data(component, input_data):
@@ -67,9 +90,20 @@ def run_input_data(component, input_data):
 
 
 def run_test(component, input_data, expected=None):
+    if filters.ENABLED:
+        mod = component.__module__
+        sup_mod = '.'.join(mod.split('.')[:-1])
+        rps = _get_registry_points(component)
+        filterable = set(d for d in rps if dr.get_delegate(d).filterable)
+        missing_filters = filterable - ADDED_FILTERS.get(mod, set()) - ADDED_FILTERS.get(sup_mod, set())
+        if missing_filters:
+            names = [dr.get_name(m) for m in missing_filters]
+            msg = "%s must add filters to %s"
+            raise Exception(msg % (mod, ", ".join(names)))
+
     broker = run_input_data(component, input_data)
     if expected:
-        unordered_compare(broker.get(component), expected)
+        deep_compare(broker.get(component), expected)
     return broker.get(component)
 
 
@@ -84,11 +118,13 @@ def context_wrap(lines,
                  version="-1.-1",
                  machine_id="machine_id",
                  strip=True,
+                 split=True,
                  **kwargs):
     if isinstance(lines, six.string_types):
         if strip:
             lines = lines.strip()
-        lines = lines.splitlines()
+        if split:
+            lines = lines.splitlines()
 
     return Context(content=lines,
                    path=path, hostname=hostname,
@@ -187,11 +223,7 @@ class InputData(object):
             if do_filter:
                 content_iter = list(apply_filters(spec, content_iter))
 
-        content_provider = ContentProvider()
-        content_provider.path = path
-        content_provider.relative_path = path
-        content_provider._content = content_iter
-
+        content_provider = context_wrap(content_iter, path=path, split=False)
         if dr.get_delegate(spec).multi_output:
             if spec not in self.data:
                 self.data[spec] = []
@@ -214,6 +246,7 @@ RHEL4 = "Red Hat Enterprise Linux AS release 4 (Nahant Update 9)"
 RHEL5 = "Red Hat Enterprise Linux Server release 5.11 (Tikanga)"
 RHEL6 = "Red Hat Enterprise Linux Server release 6.5 (Santiago)"
 RHEL7 = "Red Hat Enterprise Linux Server release 7.0 (Maipo)"
+RHEL8 = "Red Hat Enterprise Linux release 8.0 (Ootpa)"
 
 
 def redhat_release(major, minor=""):
@@ -249,6 +282,11 @@ def redhat_release(major, minor=""):
             minor = "" if minor == "0" else " Update %s" % minor
         return "Red Hat Enterprise Linux AS release %s (Nahant%s)" % (major, minor)
 
+    if major == "8":
+        if not minor:
+            minor = "0"
+        return "Red Hat Enterprise Linux release %s.%s Beta (Ootpa)" % (major, minor)
+
     template = "Red Hat Enterprise Linux Server release %s%s (%s)"
     if major == "5":
         if minor:
@@ -263,7 +301,7 @@ def redhat_release(major, minor=""):
         raise Exception("invalid major version: %s" % major)
 
 
-def archive_provider(component, test_func=unordered_compare, stride=1):
+def archive_provider(component, test_func=deep_compare, stride=1):
     """
     Decorator used to register generator functions that yield InputData and
     expected response tuples.  These generators will be consumed by py.test
@@ -284,7 +322,7 @@ def archive_provider(component, test_func=unordered_compare, stride=1):
         yield every `stride` InputData object rather than the full set. This
         is used to provide a faster execution path in some test setups.
 
-    [1] insights.tests.unordered_compare()
+    [1] insights.tests.deep_compare()
     """
     def _wrap(func):
         @six.wraps(func)

@@ -1,7 +1,7 @@
 import logging
 import os
-from insights.util.subproc import call
-from subprocess import STDOUT
+from contextlib import contextmanager
+from insights.util import streams, subproc
 
 log = logging.getLogger(__name__)
 GLOBAL_PRODUCTS = []
@@ -111,6 +111,9 @@ class Context(object):
             else:
                 setattr(self, p.name, create_product(self.metadata, self.hostname))
 
+    def stream(self):
+        return iter(self.content)
+
     def product(self):
         for pname in PRODUCT_NAMES:
             if hasattr(self, pname):
@@ -126,15 +129,17 @@ class ExecutionContext(object):
         self.timeout = timeout
         self.all_files = all_files or []
 
-    def check_output(self, cmd, timeout=None, keep_rc=False):
+    def check_output(self, cmd, timeout=None, keep_rc=False, env=None):
         """ Subclasses can override to provide special
             environment setup, command prefixes, etc.
         """
-        return call(cmd, timeout=timeout or self.timeout, stderr=STDOUT, keep_rc=keep_rc)
+        return subproc.call(cmd, timeout=timeout or self.timeout,
+                keep_rc=keep_rc, env=env)
 
-    def shell_out(self, cmd, split=True, timeout=None, keep_rc=False):
+    def shell_out(self, cmd, split=True, timeout=None, keep_rc=False, env=None):
+        env = env or os.environ
         rc = None
-        raw = self.check_output(cmd, timeout=timeout, keep_rc=keep_rc)
+        raw = self.check_output(cmd, timeout=timeout, keep_rc=keep_rc, env=env)
         if keep_rc:
             rc, output = raw
         else:
@@ -144,6 +149,16 @@ class ExecutionContext(object):
             output = output.splitlines()
 
         return (rc, output) if keep_rc else output
+
+    @contextmanager
+    def stream(self, *args, **kwargs):
+        with streams.stream(*args, **kwargs) as s:
+            yield s
+
+    @contextmanager
+    def connect(self, *args, **kwargs):
+        with streams.connect(*args, **kwargs) as s:
+            yield s
 
     def locate_path(self, path):
         return os.path.expandvars(path)
@@ -155,7 +170,8 @@ class ExecutionContext(object):
 
 @fs_root
 class HostContext(ExecutionContext):
-    pass
+    def __init__(self, root='/', timeout=30, all_files=None):
+        super(HostContext, self).__init__(root=root, timeout=timeout, all_files=all_files)
 
 
 @fs_root
@@ -170,6 +186,11 @@ class SosArchiveContext(ExecutionContext):
 
 @fs_root
 class ClusterArchiveContext(ExecutionContext):
+    pass
+
+
+@fs_root
+class SerializedArchiveContext(ExecutionContext):
     pass
 
 

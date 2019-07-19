@@ -1,4 +1,5 @@
 import os
+import sys
 from setuptools import setup, find_packages
 
 __here__ = os.path.dirname(os.path.abspath(__file__))
@@ -11,7 +12,13 @@ for name in package_info:
 
 entry_points = {
     'console_scripts': [
+        'insights-collect = insights.collect:main',
         'insights-run = insights:main',
+        'insights = insights.command_parser:main',
+        'insights-cat = insights.tools.cat:main',
+        'insights-dupkeycheck = insights.tools.dupkeycheck:main',
+        'insights-inspect = insights.tools.insights_inspect:main',
+        'insights-info = insights.tools.query:main',
         'gen_api = insights.tools.generate_api_config:main',
         'insights-perf = insights.tools.perf:main',
         'client = insights.client:run',
@@ -20,9 +27,20 @@ entry_points = {
 }
 
 runtime = set([
-    'pyyaml>=3.10,<=3.13',
     'six',
+    'requests',
+    'redis',
+    'cachecontrol',
+    'cachecontrol[redis]',
+    'cachecontrol[filecache]',
+    'defusedxml',
+    'lockfile',
 ])
+
+if (sys.version_info < (2, 7)):
+    runtime.add('pyyaml>=3.10,<=3.13')
+else:
+    runtime.add('pyyaml')
 
 
 def maybe_require(pkg):
@@ -42,21 +60,42 @@ client = set([
 ])
 
 develop = set([
-    'flake8==3.3.0',
+    'futures==3.0.5',
+    'wheel',
+])
+
+docs = set([
+    'Sphinx',
+    'nbsphinx',
+    'sphinx_rtd_theme',
+    'ipython',
+    'colorama',
+    'jinja2',
+])
+
+testing = set([
     'coverage==4.3.4',
     'pytest==3.0.6',
     'pytest-cov==2.4.0',
-    'Sphinx',
-    'nbsphinx==0.3.1',
-    'sphinx_rtd_theme',
-    'futures==3.0.5',
-    'requests==2.13.0',
-    'wheel',
-    'ipython<6',
+    'mock==2.0.0',
+])
+
+cluster = set([
+    'ansible',
+    'pandas',
+    'jinja2',
+    'colorama',
+])
+
+openshift = set([
+    'openshift'
+])
+
+linting = set([
+    'flake8==2.6.2',
 ])
 
 optional = set([
-    'jinja2',
     'python-cjson',
     'python-logstash',
     'python-statsd',
@@ -80,9 +119,15 @@ if __name__ == "__main__":
         package_data={'': ['LICENSE']},
         license='Apache 2.0',
         extras_require={
-            'develop': list(runtime | develop | client),
+            'develop': list(runtime | develop | client | docs | linting | testing | cluster),
+            'develop26': list(runtime | develop | client | linting | testing | cluster),
             'client': list(runtime | client),
+            'cluster': list(runtime | cluster),
+            'openshift': list(runtime | openshift),
             'optional': list(optional),
+            'docs': list(docs),
+            'linting': list(linting | client),
+            'testing': list(testing | client)
         },
         classifiers=[
             'Development Status :: 5 - Production/Stable',

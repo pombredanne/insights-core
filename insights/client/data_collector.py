@@ -10,11 +10,13 @@ import logging
 import copy
 import glob
 import six
+import shlex
 from subprocess import Popen, PIPE, STDOUT
 from tempfile import NamedTemporaryFile
 
+from insights.util import mangle
 from ..contrib.soscleaner import SOSCleaner
-from .utilities import _expand_paths
+from .utilities import _expand_paths, get_version_info
 from .constants import InsightsConstants as constants
 from .insights_spec import InsightsFile, InsightsCommand
 
@@ -39,11 +41,24 @@ class DataCollector(object):
         self.mountpoint = '/'
         if mountpoint:
             self.mountpoint = mountpoint
+        self.hostname_path = None
 
     def _write_branch_info(self, branch_info):
         logger.debug("Writing branch information to archive...")
         self.archive.add_metadata_to_archive(
             json.dumps(branch_info), '/branch_info')
+
+    def _write_display_name(self):
+        if self.config.display_name:
+            logger.debug("Writing display_name to archive...")
+            self.archive.add_metadata_to_archive(
+                self.config.display_name, '/display_name')
+
+    def _write_version_info(self):
+        logger.debug("Writing version information to archive...")
+        version_info = get_version_info()
+        self.archive.add_metadata_to_archive(
+            json.dumps(version_info), '/version_info')
 
     def _run_pre_command(self, pre_cmd):
         '''
@@ -101,6 +116,19 @@ class DataCollector(object):
             el_globs.append(_spec)
         return el_globs
 
+    def _blacklist_check(self, cmd):
+        def _get_nested_parts(cmd):
+            parts = shlex.split(cmd.replace(';', ' '))
+            all_parts = parts[:]
+            for p in parts:
+                if len(shlex.split(p)) > 1:
+                    all_parts += _get_nested_parts(p)
+            return all_parts
+
+        cmd_parts = _get_nested_parts(cmd)
+        return len(set.intersection(set(cmd_parts),
+                   constants.command_blacklist)) > 0
+
     def _parse_command_spec(self, spec, precmds):
         '''
         Run pre_commands
@@ -109,6 +137,10 @@ class DataCollector(object):
             precmd_alias = spec['pre_command']
             try:
                 precmd = precmds[precmd_alias]
+
+                if self._blacklist_check(precmd):
+                    raise RuntimeError("Command Blacklist: " + precmd)
+
                 args = self._run_pre_command(precmd)
                 logger.debug('Pre-command results: %s', args)
 
@@ -125,45 +157,6 @@ class DataCollector(object):
         else:
             return [spec]
 
-    def run_specific_specs(self, metadata_spec, conf, rm_conf, exclude, branch_info):
-        '''
-        Running metadata collection for specific environment
-        '''
-        logger.debug('Beginning to run collection spec for %s...', metadata_spec)
-        if metadata_spec in conf:
-            for spec in conf[metadata_spec]:
-                if 'file' in spec:
-                    spec['archive_file_name'] = spec['file']
-                    if rm_conf and 'files' in rm_conf and spec['file'] in rm_conf['files']:
-                        logger.warn("WARNING: Skipping file %s", spec['file'])
-                        continue
-                    else:
-                        file_specs = self._parse_file_spec(spec)
-                        for s in file_specs:
-                            file_spec = InsightsFile(s, exclude, self.mountpoint, self.target_name)
-                            self.archive.add_to_archive(file_spec)
-                elif 'glob' in spec:
-                    glob_specs = self._parse_glob_spec(spec)
-                    for g in glob_specs:
-                        if rm_conf and 'files' in rm_conf and g['file'] in rm_conf['files']:
-                            logger.warn("WARNING: Skipping file %s", g)
-                            continue
-                        else:
-                            glob_spec = InsightsFile(g, exclude, self.mountpoint, self.target_name)
-                            self.archive.add_to_archive(glob_spec)
-                elif 'command' in spec:
-                    if rm_conf and 'commands' in rm_conf and spec['command'] in rm_conf['commands']:
-                        logger.warn("WARNING: Skipping command %s", spec['command'])
-                        continue
-                    else:
-                        cmd_specs = self._parse_command_spec(spec, conf['pre_commands'])
-                        for s in cmd_specs:
-                            cmd_spec = InsightsCommand(self.config, s, exclude, self.mountpoint, self.target_name)
-                            self.archive.add_to_archive(cmd_spec)
-        else:
-            logger.debug('Spec metadata type "%s" not found in spec.', metadata_spec)
-        logger.debug('Spec metadata collection finished.')
-
     def run_collection(self, conf, rm_conf, branch_info):
         '''
         Run specs and collect all the data
@@ -175,33 +168,39 @@ class DataCollector(object):
         if rm_conf:
             try:
                 exclude = rm_conf['patterns']
+                logger.warn("WARNING: Skipping patterns found in remove.conf")
             except LookupError:
-                logger.debug('Could not parse remove.conf. Ignoring...')
-
-        if self.config.run_specific_specs is not None:
-            logger.debug('Running specific specs %s', self.config.run_specific_specs)
-            for specific_spec in self.config.run_specific_specs.split(','):
-                logger.debug('Running specific spec %s', specific_spec)
-                self.run_specific_specs(specific_spec, conf, rm_conf, exclude, branch_info)
-                logger.debug('Finished running specific spec %s', specific_spec)
-            return
+                logger.debug('Patterns section of remove.conf is empty.')
 
         for c in conf['commands']:
-            if c['command'] in rm_conf.get('commands', []):
+            # remember hostname archive path
+            if c.get('symbolic_name') == 'hostname':
+                self.hostname_path = os.path.join(
+                    'insights_commands', mangle.mangle_command(c['command']))
+            rm_commands = rm_conf.get('commands', [])
+            if c['command'] in rm_commands or c.get('symbolic_name') in rm_commands:
                 logger.warn("WARNING: Skipping command %s", c['command'])
             elif self.mountpoint == "/" or c.get("image"):
                 cmd_specs = self._parse_command_spec(c, conf['pre_commands'])
                 for s in cmd_specs:
+                    if s['command'] in rm_commands:
+                        logger.warn("WARNING: Skipping command %s", s['command'])
+                        continue
                     cmd_spec = InsightsCommand(self.config, s, exclude, self.mountpoint)
                     self.archive.add_to_archive(cmd_spec)
         for f in conf['files']:
-            if f['file'] in rm_conf.get('files', []):
+            rm_files = rm_conf.get('files', [])
+            if f['file'] in rm_files or f.get('symbolic_name') in rm_files:
                 logger.warn("WARNING: Skipping file %s", f['file'])
             else:
                 file_specs = self._parse_file_spec(f)
                 for s in file_specs:
-                    file_spec = InsightsFile(s, exclude, self.mountpoint)
-                    self.archive.add_to_archive(file_spec)
+                    # filter files post-wildcard parsing
+                    if s['file'] in rm_conf.get('files', []):
+                        logger.warn("WARNING: Skipping file %s", s['file'])
+                    else:
+                        file_spec = InsightsFile(s, exclude, self.mountpoint)
+                        self.archive.add_to_archive(file_spec)
         if 'globs' in conf:
             for g in conf['globs']:
                 glob_specs = self._parse_glob_spec(g)
@@ -216,6 +215,8 @@ class DataCollector(object):
         # collect metadata
         logger.debug('Collecting metadata...')
         self._write_branch_info(branch_info)
+        self._write_display_name()
+        self._write_version_info()
         logger.debug('Metadata collection finished.')
 
     def done(self, conf, rm_conf):
@@ -224,10 +225,12 @@ class DataCollector(object):
         """
         if self.config.obfuscate:
             cleaner = SOSCleaner(quiet=True)
-            clean_opts = CleanOptions(self.config, self.archive.tmp_dir, rm_conf)
+            clean_opts = CleanOptions(
+                self.config, self.archive.tmp_dir, rm_conf, self.hostname_path)
             fresh = cleaner.clean_report(clean_opts, self.archive.archive_dir)
             if clean_opts.keyword_file is not None:
                 os.remove(clean_opts.keyword_file.name)
+                logger.warn("WARNING: Skipping keywords found in remove.conf")
             return fresh[0]
         return self.archive.create_tar_file()
 
@@ -236,7 +239,7 @@ class CleanOptions(object):
     """
     Options for soscleaner
     """
-    def __init__(self, config, tmp_dir, rm_conf):
+    def __init__(self, config, tmp_dir, rm_conf, hostname_path):
         self.report_dir = tmp_dir
         self.domains = []
         self.files = []
@@ -257,6 +260,7 @@ class CleanOptions(object):
                 pass
 
         if config.obfuscate_hostname:
-            self.hostname_path = "insights_commands/hostname"
+            # default to its original location
+            self.hostname_path = hostname_path or 'insights_commands/hostname'
         else:
             self.hostname_path = None

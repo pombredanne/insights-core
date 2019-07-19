@@ -8,6 +8,7 @@ from datetime import datetime
 from itertools import chain
 from collections import OrderedDict
 from insights import dr, get_filters
+from insights.core.spec_factory import RegistryPoint
 from insights.specs import Specs
 
 if len(sys.argv) < 3:
@@ -23,7 +24,7 @@ if not os.path.exists(json_path):
 with open(json_path) as fp:
     uploader_json = json.load(fp, object_pairs_hook=OrderedDict)
 
-dr.load_components("insights.specs")
+dr.load_components("insights.specs.default")
 dr.load_components("insights.parsers")
 dr.load_components("insights.combiners")
 
@@ -34,11 +35,12 @@ specs = sorted(vars(Specs))
 filters = {}
 for spec in specs:
     s = getattr(Specs, spec)
-    f = get_filters(s)
-    if f:
-        filters[spec] = sorted(f)
+    if type(s) == RegistryPoint:
+        f = get_filters(s)
+        if f:
+            filters[spec] = sorted(f)
 
-for spec in chain.from_iterable(uploader_json[i] for i in ("commands", "files")):
+for spec in chain.from_iterable(uploader_json[i] for i in ("commands", "files", "globs")):
     if spec["symbolic_name"] in filters:
         spec["pattern"] = filters[spec["symbolic_name"]]
 

@@ -7,26 +7,35 @@ import traceback
 
 from collections import defaultdict
 from glob import glob
+from subprocess import call
 
 from insights.core import blacklist, dr
 from insights.core.filters import get_filters
 from insights.core.context import ExecutionContext, FSRoots, HostContext
 from insights.core.plugins import datasource, ContentException, is_datasource
+from insights.util import fs, streams, which
+from insights.util.subproc import Pipeline
 from insights.core.serde import deserializer, serializer
-from insights.util import subproc
 import shlex
 
 log = logging.getLogger(__name__)
 
 
-COMMANDS = {}
-
 SAFE_ENV = {
-    "PATH": os.path.pathsep.join(["/bin", "/usr/bin", "/sbin", "/usr/sbin"])
+    "PATH": os.path.pathsep.join([
+        "/bin",
+        "/usr/bin",
+        "/sbin",
+        "/usr/sbin",
+        "/usr/share/Modules/bin",
+    ]),
+    "LC_ALL": "C",
 }
 """
 A minimal set of environment variables for use in subprocess calls
 """
+if "LANG" in os.environ:
+    SAFE_ENV["LANG"] = os.environ["LANG"]
 
 
 def enc(s):
@@ -76,13 +85,29 @@ class ContentProvider(object):
         self.cmd = None
         self.args = None
         self.rc = None
-        self.path = None
+        self.root = None
         self.relative_path = None
+        self.loaded = False
         self._content = None
         self._exception = None
 
     def load(self):
         raise NotImplemented()
+
+    def stream(self):
+        """
+        Returns a generator of lines instead of a list of lines.
+        """
+        st = self._stream()
+        for l in next(st):
+            yield l.rstrip("\n")
+
+    def _stream(self):
+        raise NotImplementedError()
+
+    @property
+    def path(self):
+        return os.path.join(self.root, self.relative_path)
 
     @property
     def content(self):
@@ -99,7 +124,7 @@ class ContentProvider(object):
         return self._content
 
     def __repr__(self):
-        msg = "<%s(path=%s, cmd=%s)>"
+        msg = "<%s(path=%r, cmd=%r)>"
         return msg % (self.__class__.__name__, self.path or "", self.cmd or "")
 
     def __unicode__(self):
@@ -109,16 +134,42 @@ class ContentProvider(object):
         return self.__unicode__()
 
 
+class DatasourceProvider(ContentProvider):
+    def __init__(self, content, relative_path, root='/', ds=None, ctx=None):
+        super(DatasourceProvider, self).__init__()
+        self.relative_path = relative_path
+        self._content = content if isinstance(content, list) else content.splitlines()
+        self.root = root
+        self.ds = ds
+        self.ctx = ctx
+
+    def _stream(self):
+        """
+        Returns a generator of lines instead of a list of lines.
+        """
+        yield self._content
+
+    def write(self, dst):
+        fs.ensure_path(os.path.dirname(dst))
+        with open(dst, "wb") as f:
+            f.write("\n".join(self.content).encode("utf-8"))
+
+        self.loaded = False
+        self._content = None
+
+    def load(self):
+        return self.content
+
+
 class FileProvider(ContentProvider):
-    def __init__(self, relative_path, root="/", ds=None):
+    def __init__(self, relative_path, root="/", ds=None, ctx=None):
         super(FileProvider, self).__init__()
         self.root = root
         self.relative_path = relative_path.lstrip("/")
-
-        self.path = os.path.join(root, self.relative_path)
         self.file_name = os.path.basename(self.path)
 
         self.ds = ds
+        self.ctx = ctx
         self.validate()
 
     def validate(self):
@@ -128,17 +179,16 @@ class FileProvider(ContentProvider):
         if not os.path.exists(self.path):
             raise ContentException("%s does not exist." % self.path)
 
-        if os.path.islink(self.path):
-            resolved = os.path.realpath(self.path)
-            if not resolved.startswith(self.root):
-                msg = "Symbolic link points outside archive: %s -> %s."
-                raise Exception(msg % (self.path, resolved))
+        resolved = os.path.realpath(self.path)
+        if not resolved.startswith(os.path.realpath(self.root)):
+            msg = "Relative path points outside the root: %s -> %s."
+            raise Exception(msg % (self.path, resolved))
 
         if not os.access(self.path, os.R_OK):
             raise ContentException("Cannot access %s" % self.path)
 
     def __repr__(self):
-        return '%s("%s")' % (self.__class__.__name__, self.path)
+        return '%s("%r")' % (self.__class__.__name__, self.path)
 
 
 class RawFileProvider(FileProvider):
@@ -148,8 +198,13 @@ class RawFileProvider(FileProvider):
     """
 
     def load(self):
+        self.loaded = True
         with open(self.path, 'rb') as f:
             return f.read()
+
+    def write(self, dst):
+        fs.ensure_path(os.path.dirname(dst))
+        call([which("cp", env=SAFE_ENV), self.path, dst], env=SAFE_ENV)
 
 
 class TextFileProvider(FileProvider):
@@ -158,71 +213,196 @@ class TextFileProvider(FileProvider):
     lines. Each line is filtered if filters are defined for the datasource.
     """
 
-    def load(self):
-
-        filters = False
-        if self.ds:
-            filters = "\n".join(get_filters(self.ds))
+    def create_args(self):
+        args = []
+        filters = "\n".join(get_filters(self.ds)) if self.ds else None
         if filters:
-            cmd = [["grep", "-F", filters, self.path]]
-            rc, out = subproc.call(cmd, shell=False, keep_rc=True, env=SAFE_ENV)
-            if rc == 0 and out != '':
-                results = out.splitlines()
+            args.append(["grep", "-F", filters, self.path])
+
+        patterns = "\n".join(blacklist.get_disallowed_patterns())
+        if patterns:
+            grep = ["grep", "-v" "-F", patterns]
+            if not args:
+                grep.append(self.path)
+            args.append(grep)
+
+        keywords = blacklist.get_disallowed_keywords()
+        if keywords:
+            sed = ["sed"]
+            for kw in keywords:
+                sed.extend(["-e", "s/%s/keyword/g" % kw.replace("/", "\\/")])
+            if not args:
+                sed.append(self.path)
+            args.append(sed)
+        return args
+
+    def load(self):
+        self.loaded = True
+        args = self.create_args()
+        if args:
+            rc, out = self.ctx.shell_out(args, keep_rc=True, env=SAFE_ENV)
+            self.rc = rc
+            return out
+        with open(self.path, "rU") as f:  # universal newlines
+            return [l.rstrip("\n") for l in f]
+
+    def _stream(self):
+        """
+        Returns a generator of lines instead of a list of lines.
+        """
+        if self._exception:
+            raise self._exception
+        try:
+            if self._content:
+                yield self._content
             else:
-                return []
+                args = self.create_args()
+                if args:
+                    with streams.connect(*args, env=SAFE_ENV) as s:
+                        yield s
+                else:
+                    with open(self.path, "rU") as f:  # universal newlines
+                        yield f
+        except StopIteration:
+            raise
+        except Exception as ex:
+            self._exception = ex
+            raise ContentException(str(ex))
+
+    def write(self, dst):
+        fs.ensure_path(os.path.dirname(dst))
+        args = self.create_args()
+        if args:
+            p = Pipeline(*args, env=SAFE_ENV)
+            p.write(dst)
         else:
-            with open(self.path, "rU") as f:
-                results = [l.rstrip("\n") for l in f]
-        return results
+            call([which("cp", env=SAFE_ENV), self.path, dst], env=SAFE_ENV)
+
+
+class SerializedOutputProvider(TextFileProvider):
+    def create_args(self):
+        pass
+
+
+class SerializedRawOutputProvider(RawFileProvider):
+    pass
 
 
 class CommandOutputProvider(ContentProvider):
     """
     Class used in datasources to return output from commands.
     """
-    def __init__(self, cmd, ctx, args=None, content=None, rc=None, split=True, keep_rc=False):
+    def __init__(self, cmd, ctx, args=None, split=True, keep_rc=False, ds=None, timeout=None, inherit_env=None):
         super(CommandOutputProvider, self).__init__()
         self.cmd = cmd
-        self.path = os.path.join("insights_commands", mangle_command(cmd))
+        self.root = "insights_commands"
+        self.relative_path = os.path.join("insights_commands", mangle_command(cmd))
         self.ctx = ctx
-        # args are already interpolated into cmd. They're stored here for context."
-        self.args = args
-        self._content = content
-        self.rc = rc
+        self.args = args  # already interpolated into cmd - stored here for context.
         self.split = split
         self.keep_rc = keep_rc
+        self.ds = ds
+        self.timeout = timeout
+        self.inherit_env = inherit_env or []
+
+        self._content = None
+        self.rc = None
+
         self.validate()
 
     def validate(self):
         if not blacklist.allow_command(self.cmd):
             raise dr.SkipComponent()
 
+        if not which(shlex.split(self.cmd)[0], env=self.create_env()):
+            raise ContentException("Couldn't execute: %s" % self.cmd)
+
+    def create_args(self):
+        command = [shlex.split(self.cmd)]
+
+        if self.split:
+            filters = "\n".join(get_filters(self.ds))
+            if filters:
+                command.append(["grep", "-F", filters])
+
+            patterns = "\n".join(blacklist.get_disallowed_patterns())
+            if patterns:
+                command.append(["grep", "-v", "-F", patterns])
+
+            keywords = blacklist.get_disallowed_keywords()
+            if keywords:
+                sed = ["sed"]
+                for kw in keywords:
+                    sed.extend(["-e", "s/%s/keyword/g" % kw.replace("/", "\\/")])
+                command.append(sed)
+        return command
+
+    def create_env(self):
+        env = dict(SAFE_ENV)
+        for e in self.inherit_env:
+            if e in os.environ:
+                env[e] = os.environ[e]
+        return env
+
     def load(self):
+        command = self.create_args()
+
+        raw = self.ctx.shell_out(command, split=self.split, keep_rc=self.keep_rc,
+                timeout=self.timeout, env=self.create_env())
         if self.keep_rc:
-            self.rc, result = self.ctx.shell_out(self.cmd, self.split, keep_rc=True)
-            return result
+            self.rc, output = raw
         else:
-            return self.ctx.shell_out(self.cmd, self.split)
+            output = raw
+        return output
+
+    def _stream(self):
+        """
+        Returns a generator of lines instead of a list of lines.
+        """
+        if self._exception:
+            raise self._exception
+        try:
+            if self._content:
+                yield self._content
+            else:
+                args = self.create_args()
+                with self.ctx.connect(*args, env=self.create_env(), timeout=self.timeout) as s:
+                    yield s
+        except StopIteration:
+            raise
+        except Exception as ex:
+            self._exception = ex
+            raise ContentException(str(ex))
+
+    def write(self, dst):
+        args = self.create_args()
+        fs.ensure_path(os.path.dirname(dst))
+        if args:
+            p = Pipeline(*args, timeout=self.timeout, env=self.create_env())
+            return p.write(dst, keep_rc=self.keep_rc)
 
     def __repr__(self):
-        return 'CommandOutputProvider("%s")' % self.cmd
+        return 'CommandOutputProvider("%r")' % self.cmd
 
 
 class RegistryPoint(object):
-    """
-    Marker class for declaring that an element of a `SpecSet` subclass
-    is a registry point against which further subclasses can register
-    datasource implementations by simply declaring them with the same name.
-    """
-    def __init__(self, metadata=None, multi_output=False, raw=False):
+    # Marker class for declaring that an element of a `SpecSet` subclass
+    # is a registry point against which further subclasses can register
+    # datasource implementations by simply declaring them with the same name.
+    #
+    # intentionally not a docstring so this doesn't show up in pydoc.
+    def __init__(self, metadata=None, multi_output=False, raw=False,
+            filterable=False):
         self.metadata = metadata
         self.multi_output = multi_output
         self.raw = raw
+        self.filterable = filterable
         self.__name__ = self.__class__.__name__
-        datasource(metadata=metadata, multi_output=multi_output, raw=raw)(self)
+        datasource([], metadata=metadata, multi_output=multi_output, raw=raw,
+                filterable=filterable)(self)
 
     def __call__(self, broker):
-        for c in reversed(dr.get_added_dependencies(self)):
+        for c in reversed(dr.get_delegate(self).deps):
             if c in broker:
                 return broker[c]
         raise dr.SkipComponent()
@@ -232,10 +412,10 @@ class RegistryPoint(object):
 
 
 class SpecDescriptor(object):
-    """
-    Descriptor Protocol handler that returns the literal function from a
-    class during dot (.) access.
-    """
+    # Descriptor Protocol handler that returns the literal function from a
+    # class during dot (.) access.
+    #
+    # intentionally not a docstring so this doesn't show up in pydoc.
     def __init__(self, func):
         self.func = func
 
@@ -246,28 +426,37 @@ class SpecDescriptor(object):
         raise AttributeError()
 
 
-def _get_ctx_dependencies(func):
-    ctxs = []
-    try:
-        for c in dr.get_dependencies(func):
+def _get_ctx_dependencies(component):
+    ctxs = set()
+    for c in dr.walk_tree(component):
+        try:
             if issubclass(c, ExecutionContext):
-                ctxs.append(c)
-    except:
-        pass
+                ctxs.add(c)
+        except:
+            pass
     return ctxs
 
 
-def _register_context_handler(parents, func):
-    name = func.__name__
+def _register_context_handler(parents, component):
+    name = component.__name__
     parents = list(itertools.takewhile(lambda x: name in x.registry, parents))
     if not parents:
         return
 
+    # If the new component handles a context, we need to tell the
+    # previously registered components that would have handled it to ignore it.
+
+    # The components that handle a context are registered on the highest class
+    # of the MRO list. This is so overrides work correctly even if a
+    # component isn't a direct sibling of the component it's overriding.
+
+    # instead of trying to unhook all of the dependencies, we just tell the
+    # previous handler of a context to ignore it.
     ctx_handlers = parents[-1].context_handlers
-    for c in _get_ctx_dependencies(func):
+    for c in _get_ctx_dependencies(component):
         for old in ctx_handlers[name][c]:
             dr.add_ignore(old, c)
-        ctx_handlers[name][c].append(func)
+        ctx_handlers[name][c].append(component)
 
 
 def _resolve_registry_points(cls, base, dct):
@@ -276,6 +465,7 @@ def _resolve_registry_points(cls, base, dct):
 
     for k, v in dct.items():
         if isinstance(v, RegistryPoint):
+            # add v under its name to this class's registry.
             v.__name__ = k
             cls.registry[k] = v
 
@@ -285,15 +475,31 @@ def _resolve_registry_points(cls, base, dct):
             v.__module__ = module
             setattr(cls, k, SpecDescriptor(v))
             if k in base.registry:
+                # if the datasource has the same name as a RegistryPoint in the
+                # base class, the datasource to the RegistryPoint.
                 point = base.registry[k]
+
+                # TODO: log when RegistryPoint and implementation properties
+                # TODO: aren't the same.
+                delegate = dr.get_delegate(v)
+                v.filterable = delegate.filterable = point.filterable
+                v.raw = delegate.raw = point.raw
+                v.multi_output = delegate.multi_output = point.multi_output
+
+                # the RegistryPoint gets the implementation datasource as a
+                # dependency
                 dr.add_dependency(point, v)
-                dr.mark_hidden(v)
+
+                # Datasources override previously defined datasources of the
+                # same name for contexts they all depend on. Here we tell
+                # datasources of the same name not to execute under contexts
+                # the new datasource will handle.
                 _register_context_handler(parents, v)
 
 
 class SpecSetMeta(type):
     """
-    The metaclass that converts RegistryPoint markers to regisry point
+    The metaclass that converts RegistryPoint markers to registry point
     datasources and hooks implementations for them into the registry.
     """
     def __new__(cls, name, bases, dct):
@@ -336,17 +542,17 @@ class simple_file(object):
     Returns:
         function: A datasource that reads all files matching the glob patterns.
     """
-    def __init__(self, path, context=None, kind=TextFileProvider):
+    def __init__(self, path, context=None, deps=[], kind=TextFileProvider, **kwargs):
         self.path = path
         self.context = context or FSRoots
         self.kind = kind
         self.raw = kind is RawFileProvider
         self.__name__ = self.__class__.__name__
-        datasource(self.context, raw=self.raw)(self)
+        datasource(self.context, *deps, raw=self.raw, **kwargs)(self)
 
     def __call__(self, broker):
         ctx = _get_context(self.context, broker)
-        return self.kind(ctx.locate_path(self.path), root=ctx.root, ds=self)
+        return self.kind(ctx.locate_path(self.path), root=ctx.root, ds=self, ctx=ctx)
 
 
 class glob_file(object):
@@ -365,7 +571,7 @@ class glob_file(object):
     Returns:
         function: A datasource that reads all files matching the glob patterns.
     """
-    def __init__(self, patterns, ignore=None, context=None, kind=TextFileProvider, max_files=1000):
+    def __init__(self, patterns, ignore=None, context=None, deps=[], kind=TextFileProvider, max_files=1000, **kwargs):
         if not isinstance(patterns, (list, set)):
             patterns = [patterns]
         self.patterns = patterns
@@ -376,7 +582,7 @@ class glob_file(object):
         self.raw = kind is RawFileProvider
         self.max_files = max_files
         self.__name__ = self.__class__.__name__
-        datasource(self.context, multi_output=True, raw=self.raw)(self)
+        datasource(self.context, *deps, multi_output=True, raw=self.raw, **kwargs)(self)
 
     def __call__(self, broker):
         ctx = _get_context(self.context, broker)
@@ -388,7 +594,7 @@ class glob_file(object):
                 if self.ignore_func(path) or os.path.isdir(path):
                     continue
                 try:
-                    results.append(self.kind(path[len(root):], root=root, ds=self))
+                    results.append(self.kind(path[len(root):], root=root, ds=self, ctx=ctx))
                 except:
                     log.debug(traceback.format_exc())
         if results:
@@ -403,10 +609,10 @@ class head(object):
     """
     Return the first element of any datasource that produces a list.
     """
-    def __init__(self, dep):
+    def __init__(self, dep, **kwargs):
         self.dep = dep
         self.__name__ = self.__class__.__name__
-        datasource(dep)(self)
+        datasource(dep, **kwargs)(self)
 
     def __call__(self, lst):
         c = lst[self.dep]
@@ -431,23 +637,23 @@ class first_file(object):
             and is readable
     """
 
-    def __init__(self, files, context=None, kind=TextFileProvider):
-        self.files = files
+    def __init__(self, paths, context=None, deps=[], kind=TextFileProvider, **kwargs):
+        self.paths = paths
         self.context = context or FSRoots
         self.kind = kind
         self.raw = kind is RawFileProvider
         self.__name__ = self.__class__.__name__
-        datasource(self.context, raw=self.raw)(self)
+        datasource(self.context, *deps, raw=self.raw, **kwargs)(self)
 
     def __call__(self, broker):
         ctx = _get_context(self.context, broker)
         root = ctx.root
-        for f in self.files:
+        for p in self.paths:
             try:
-                return self.kind(ctx.locate_path(f), root=root, ds=self)
+                return self.kind(ctx.locate_path(p), root=root, ds=self, ctx=ctx)
             except:
                 pass
-        raise ContentException("None of [%s] found." % ', '.join(self.files))
+        raise ContentException("None of [%s] found." % ', '.join(self.paths))
 
 
 class listdir(object):
@@ -466,13 +672,13 @@ class listdir(object):
             in the directory specified by path
     """
 
-    def __init__(self, path, context=None, ignore=None):
+    def __init__(self, path, context=None, ignore=None, deps=[]):
         self.path = path
         self.context = context or FSRoots
         self.ignore = ignore
         self.ignore_func = re.compile(ignore).search if ignore else lambda x: False
         self.__name__ = self.__class__.__name__
-        datasource(self.context)(self)
+        datasource(self.context, *deps)(self)
 
     def __call__(self, broker):
         ctx = _get_context(self.context, broker)
@@ -505,38 +711,29 @@ class simple_command(object):
         timeout (int): Number of seconds to wait for the command to complete.
             If the timeout is reached before the command returns, a
             CalledProcessError is raised. If None, timeout is infinite.
+        inherit_env (list): The list of environment variables to inherit from the
+            calling process when the command is invoked.
 
     Returns:
         function: A datasource that returns the output of a command that takes
             no arguments
     """
 
-    def __init__(self, cmd, context=HostContext, split=True, keep_rc=False, timeout=None):
+    def __init__(self, cmd, context=HostContext, deps=[], split=True, keep_rc=False, timeout=None, inherit_env=[], **kwargs):
         self.cmd = cmd
         self.context = context
         self.split = split
+        self.raw = not split
         self.keep_rc = keep_rc
         self.timeout = timeout
-        COMMANDS[self] = cmd
+        self.inherit_env = inherit_env
         self.__name__ = self.__class__.__name__
-        datasource(self.context)(self)
+        datasource(self.context, *deps, raw=self.raw, **kwargs)(self)
 
     def __call__(self, broker):
         ctx = broker[self.context]
-        rc = None
-        if self.split:
-            filters = "\n".join(get_filters(self))
-        if filters:
-            command = [shlex.split(self.cmd)] + [["grep", "-F", filters]]
-            raw = ctx.shell_out(command, split=self.split, keep_rc=self.keep_rc, timeout=self.timeout)
-        else:
-            command = [shlex.split(self.cmd)]
-            raw = ctx.shell_out(command, split=self.split, keep_rc=self.keep_rc, timeout=self.timeout)
-        if self.keep_rc:
-            rc, result = raw
-        else:
-            result = raw
-        return CommandOutputProvider(self.cmd, ctx, split=self.split, content=result, rc=rc, keep_rc=self.keep_rc)
+        return CommandOutputProvider(self.cmd, ctx, split=self.split,
+                keep_rc=self.keep_rc, ds=self, timeout=self.timeout, inherit_env=self.inherit_env)
 
 
 class foreach_execute(object):
@@ -563,21 +760,26 @@ class foreach_execute(object):
         timeout (int): Number of seconds to wait for the command to complete.
             If the timeout is reached before the command returns, a
             CalledProcessError is raised. If None, timeout is infinite.
+        inherit_env (list): The list of environment variables to inherit from the
+            calling process when the command is invoked.
+
 
     Returns:
         function: A datasource that returns a list of outputs for each command
         created by substituting each element of provider into the cmd template.
     """
 
-    def __init__(self, provider, cmd, context=HostContext, split=True, keep_rc=False, timeout=None):
+    def __init__(self, provider, cmd, context=HostContext, deps=[], split=True, keep_rc=False, timeout=None, inherit_env=[], **kwargs):
         self.provider = provider
         self.cmd = cmd
         self.context = context
         self.split = split
+        self.raw = not split
         self.keep_rc = keep_rc
         self.timeout = timeout
+        self.inherit_env = inherit_env
         self.__name__ = self.__class__.__name__
-        datasource(self.provider, self.context, multi_output=True)(self)
+        datasource(self.provider, self.context, *deps, multi_output=True, raw=self.raw, **kwargs)(self)
 
     def __call__(self, broker):
         result = []
@@ -590,22 +792,10 @@ class foreach_execute(object):
         for e in source:
             try:
                 the_cmd = self.cmd % e
-                rc = None
-
-                if self.split:
-                    filters = "\n".join(get_filters(self))
-                if filters:
-                    command = [shlex.split(the_cmd)] + [["grep", "-F", filters]]
-                    raw = ctx.shell_out(command, split=self.split, keep_rc=self.keep_rc, timeout=self.timeout)
-                else:
-                    command = [shlex.split(the_cmd)]
-                    raw = ctx.shell_out(command, split=self.split, keep_rc=self.keep_rc, timeout=self.timeout)
-                if self.keep_rc:
-                    rc, output = raw
-                else:
-                    output = raw
-                result.append(CommandOutputProvider(the_cmd, ctx, args=e, content=output, rc=rc, split=self.split,
-                                                    keep_rc=self.keep_rc))
+                cop = CommandOutputProvider(the_cmd, ctx, args=e,
+                        split=self.split, keep_rc=self.keep_rc, ds=self,
+                        timeout=self.timeout, inherit_env=self.inherit_env)
+                result.append(cop)
             except:
                 log.debug(traceback.format_exc())
         if result:
@@ -630,7 +820,7 @@ class foreach_collect(object):
             substituting each element of provider into the path template.
     """
 
-    def __init__(self, provider, path, ignore=None, context=HostContext, kind=TextFileProvider):
+    def __init__(self, provider, path, ignore=None, context=HostContext, deps=[], kind=TextFileProvider, **kwargs):
         self.provider = provider
         self.path = path
         self.ignore = ignore
@@ -639,7 +829,7 @@ class foreach_collect(object):
         self.kind = kind
         self.raw = kind is RawFileProvider
         self.__name__ = self.__class__.__name__
-        datasource(self.provider, self.context, multi_output=True, raw=self.raw)(self)
+        datasource(self.provider, self.context, *deps, multi_output=True, raw=self.raw, **kwargs)(self)
 
     def __call__(self, broker):
         result = []
@@ -656,7 +846,7 @@ class foreach_collect(object):
                 if self.ignore_func(p) or os.path.isdir(p):
                     continue
                 try:
-                    result.append(self.kind(p[len(root):], root=root, ds=self))
+                    result.append(self.kind(p[len(root):], root=root, ds=self, ctx=ctx))
                 except:
                     log.debug(traceback.format_exc())
         if result:
@@ -671,7 +861,7 @@ class first_of(object):
     """
     def __init__(self, deps):
         self.deps = deps
-        dr.mark_hidden(deps)
+        self.raw = deps[0].raw
         self.__name__ = self.__class__.__name__
         datasource(deps)(self)
 
@@ -681,28 +871,75 @@ class first_of(object):
                 return broker[c]
 
 
-@serializer(TextFileProvider)
-def serialize_text_provider(obj):
-    d = {}
-    d["path"] = obj.path
-    d["_content"] = obj.content
-    return d
-
-
 @serializer(CommandOutputProvider)
-def serialize_command_provider(obj):
-    d = {}
-    d["rc"] = obj.rc
-    d["cmd"] = obj.cmd
-    d["args"] = obj.args
-    d["path"] = obj.path
-    d["_content"] = obj.content
-    return d
+def serialize_command_output(obj, root):
+    rel = os.path.join("insights_commands", mangle_command(obj.cmd))
+    dst = os.path.join(root, rel)
+    rc = obj.write(dst)
+    return {
+        "rc": rc,
+        "cmd": obj.cmd,
+        "args": obj.args,
+        "relative_path": rel
+    }
 
 
-@deserializer(ContentProvider)
-def deserialize_content(_type, obj):
-    c = ContentProvider()
-    for k, v in obj.items():
-        setattr(c, k, v)
-    return c
+@deserializer(CommandOutputProvider)
+def deserialize_command_output(_type, data, root):
+    rel = data["relative_path"]
+
+    res = SerializedOutputProvider(rel, root)
+
+    res.rc = data["rc"]
+    res.cmd = data["cmd"]
+    res.args = data["args"]
+    return res
+
+
+@serializer(TextFileProvider)
+def serialize_text_file_provider(obj, root):
+    dst = os.path.join(root, obj.relative_path)
+    rc = obj.write(dst)
+    return {
+        "relative_path": obj.relative_path,
+        "rc": rc,
+    }
+
+
+@deserializer(TextFileProvider)
+def deserialize_text_provider(_type, data, root):
+    rel = data["relative_path"]
+    res = SerializedOutputProvider(rel, root)
+    res.rc = data["rc"]
+    return res
+
+
+@serializer(RawFileProvider)
+def serialize_raw_file_provider(obj, root):
+    dst = os.path.join(root, obj.relative_path)
+    rc = obj.write(dst)
+    return {
+        "relative_path": obj.relative_path,
+        "rc": rc,
+    }
+
+
+@deserializer(RawFileProvider)
+def deserialize_raw_file_provider(_type, data, root):
+    rel = data["relative_path"]
+    res = SerializedRawOutputProvider(rel, root)
+    res.rc = data["rc"]
+    return res
+
+
+@serializer(DatasourceProvider)
+def serialize_datasource_provider(obj, root):
+    dst = os.path.join(root, obj.relative_path.lstrip("/"))
+    fs.ensure_path(os.path.dirname(dst))
+    obj.write(dst)
+    return {"relative_path": obj.relative_path}
+
+
+@deserializer(DatasourceProvider)
+def deserialize_datasource_provider(_type, data, root):
+    return SerializedRawOutputProvider(data["relative_path"], root)

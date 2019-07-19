@@ -88,6 +88,7 @@ def optlist_to_dict(optlist, opt_sep=',', kv_sep='=', strip_quotes=False):
     def make_kv(opt):
         if kv_sep is not None and kv_sep in opt:
             k, v = opt.split(kv_sep, 1)
+            k = k.strip()
             if strip_quotes and v[0] in ('"', "'") and v[-1] == v[0]:
                 return k, v[1:-1]
             else:
@@ -324,6 +325,13 @@ def parse_fixed_table(table_lines,
         [{'Column1': 'data1', 'Column2': 'data 2', 'Column3': 'data   3'},
          {'Column1': 'data4', 'Column2': 'data5', 'Column3': 'data6'}]
     """
+    def calc_column_indices(line, headers):
+        idx = []
+        for h in headers:
+            i = idx[-1] + 1 if idx else 0
+            idx.append(line.index(h, i))
+        return idx
+
     first_line = calc_offset(table_lines, heading_ignore)
     try:
         last_line = len(table_lines) - calc_offset(reversed(table_lines),
@@ -337,7 +345,7 @@ def parse_fixed_table(table_lines,
         for old_val, new_val in header_substitute:
             header = header.replace(old_val, new_val)
     col_headers = header.strip().split()
-    col_index = [header.index(c) for c in col_headers]
+    col_index = calc_column_indices(header, col_headers)
 
     table_data = []
     for line in table_lines[first_line + 1:last_line]:

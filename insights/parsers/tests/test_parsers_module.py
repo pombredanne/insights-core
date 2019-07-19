@@ -225,6 +225,12 @@ Trailing non-data line
 """.strip()
 
 
+FIXED_CONTENT_DUP_HEADER_PREFIXES = """
+NAMESPACE    NAME    LABELS
+default      foo     app=superawesome
+""".strip()
+
+
 def test_parse_fixed_table():
     data = parse_fixed_table(FIXED_CONTENT_1.splitlines())
     assert len(data) == 3
@@ -280,6 +286,9 @@ def test_parse_fixed_table():
     assert data[4] == {'Column1': 'fooTrailing', 'Column_2': 'non-data li', 'Column_3': 'ne'}
     assert data[5] == {'Column1': 'foo Another', 'Column_2': 'trailing no', 'Column_3': 'n-data line'}
 
+    data = parse_fixed_table(FIXED_CONTENT_DUP_HEADER_PREFIXES.splitlines())
+    assert data[0] == {'NAMESPACE': 'default', 'NAME': 'foo', 'LABELS': 'app=superawesome'}
+
 
 def test_optlist_standard():
     d = optlist_to_dict('key1,key2=val2,key1=val1,key3')
@@ -308,6 +317,14 @@ def test_optlist_strip_quotes():
     assert d['key2'] == 'bar'
     assert d['key3'] == '"mismatched quotes\''
     assert d['key4'] == "inner'quotes"
+
+
+def test_optlist_with_spaces():
+    d = optlist_to_dict(
+        '''key1=foo,  key2=bar'''
+    )
+    assert 'key1' in d
+    assert 'key2' in d
 
 
 PS_AUX_TEST = """

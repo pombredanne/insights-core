@@ -1,12 +1,13 @@
 import logging
 import os
+from itertools import product
 
 from insights.core import archives
-from insights.core import dr
-from insights.core import serde
-from insights.core.archives import COMPRESSION_TYPES
-from insights.core.context import ClusterArchiveContext, JDRContext, HostArchiveContext, SosArchiveContext
-from insights.core.evaluators import SingleEvaluator
+from insights.core.context import (ClusterArchiveContext,
+                                   JDRContext,
+                                   HostArchiveContext,
+                                   SosArchiveContext,
+                                   SerializedArchiveContext)
 
 log = logging.getLogger(__name__)
 
@@ -19,33 +20,36 @@ def get_all_files(path):
     return all_files
 
 
-def determine_context(common_path, files):
-    if any(f.endswith(COMPRESSION_TYPES) for f in os.listdir(common_path)):
-        return ClusterArchiveContext
+def identify(files):
+    markers = {"insights_archive.txt": SerializedArchiveContext,
+               "insights_commands": HostArchiveContext,
+               "sos_commands": SosArchiveContext,
+               "JBOSS_HOME": JDRContext}
 
-    for f in files:
-        if "insights_commands" in f:
-            return HostArchiveContext
-        elif "sos_commands" in f:
-            return SosArchiveContext
-        elif "JBOSS_HOME" in f:
-            return JDRContext
+    for f, m in product(files, markers):
+        if m in f:
+            i = f.find(m)
+            common_path = os.path.dirname(f[:i])
+            ctx = markers[m]
+            return common_path, ctx
 
-    return HostArchiveContext
+    common_path = os.path.dirname(os.path.commonprefix(files))
+    if not common_path:
+        raise archives.InvalidArchive("Unable to determine common path")
+
+    return common_path, HostArchiveContext
 
 
 def create_context(path, context=None):
+    top = os.listdir(path)
+    arc = [os.path.join(path, f) for f in top if f.endswith(archives.COMPRESSION_TYPES)]
+    if arc:
+        return ClusterArchiveContext(path, all_files=arc)
+
     all_files = get_all_files(path)
-    common_path = os.path.dirname(os.path.commonprefix(all_files))
-    context = context or determine_context(common_path, all_files)
+    if not all_files:
+        raise archives.InvalidArchive("No files in archive")
+
+    common_path, ctx = identify(all_files)
+    context = context or ctx
     return context(common_path, all_files=all_files)
-
-
-def hydrate_new_dir(path, broker=None):
-    broker = broker or dr.Broker()
-    for root, dirs, names in os.walk(path):
-        for name in names:
-            p = os.path.join(root, name)
-            with open(p) as f:
-                serde.hydrate(serde.ser.load(f), broker)
-    return SingleEvaluator(broker=broker)

@@ -4,12 +4,18 @@ import logging
 import tempfile
 import shlex
 import shutil
+import sys
 from subprocess import Popen, PIPE
 
 from .. import package_info
 from . import client
 from .constants import InsightsConstants as constants
 from .config import InsightsConfig
+from .auto_config import try_auto_configuration
+from .utilities import (delete_registered_file,
+                        delete_unregistered_file,
+                        write_to_disk,
+                        generate_machine_id)
 
 logger = logging.getLogger(__name__)
 net_logger = logging.getLogger("network")
@@ -17,25 +23,45 @@ net_logger = logging.getLogger("network")
 
 class InsightsClient(object):
 
-    def __init__(self, config, setup_logging=True, **kwargs):
+    def __init__(self, config=None, setup_logging=True, **kwargs):
         """
         The Insights client interface
         """
-        #  small hack to maintain compatability with RPM wrapper
-        if isinstance(config, InsightsConfig):
-            self.config = config
+        if config is None:
+            # initialize with default config if not specified with one
+            self.config = InsightsConfig()
         else:
-            self.config = InsightsConfig().load_all()
-        # end hack. in the future, just set self.config=config
+            # BEGIN small hack to maintain compatibility with RPM wrapper:
+            #   wrapper calls with bool second arg so be smart about it
+            if isinstance(config, InsightsConfig):
+                self.config = config
+            else:
+                try:
+                    self.config = InsightsConfig(_print_errors=True).load_all()
+                except ValueError as e:
+                    sys.stderr.write('ERROR: ' + str(e) + '\n')
+                    sys.exit(constants.sig_kill_bad)
+            # END hack. in the future, just set self.config=config
 
-        # set up logging
+        # setup_logging is True when called from phase, but not from wrapper.
+        #  use this to do any common init (like auto_config)
         if setup_logging:
             self.set_up_logging()
+            try_auto_configuration(self.config)
 
         # setup insights connection placeholder
         # used for requests
         self.session = None
         self.connection = None
+
+    def _net(func):
+        def _init_connection(self, *args, **kwargs):
+            # setup a request session
+            if not self.config.offline and not self.session:
+                self.connection = client.get_connection(self.config)
+                self.session = self.connection.session
+            return func(self, *args, **kwargs)
+        return _init_connection
 
     def get_conf(self):
         # need this getter to maintain compatability with RPM wrapper
@@ -47,17 +73,19 @@ class InsightsClient(object):
     def version(self):
         return "%s-%s" % (package_info["VERSION"], package_info["RELEASE"])
 
+    @_net
     def test_connection(self):
         """
             returns (int): 0 if success 1 if failure
         """
-        return client.test_connection(self.config)
+        return self.connection.test_connection()
 
+    @_net
     def branch_info(self):
         """
             returns (dict): {'remote_leaf': -1, 'remote_branch': -1}
         """
-        return client.get_branch_info(self.config)
+        return client.get_branch_info(self.config, self.connection)
 
     def fetch(self, force=False):
         """
@@ -72,8 +100,23 @@ class InsightsClient(object):
 
         logger.debug("Beginning core fetch.")
 
+        # guess the URLs based on what legacy setting is
+        egg_url = self.config.egg_path
+        egg_gpg_url = self.config.egg_gpg_path
+        if egg_url is None:
+            egg_url = '/v1/static/core/insights-core.egg'
+            # if self.config.legacy_upload:
+            #     egg_url = '/v1/static/core/insights-core.egg'
+            # else:
+            #     egg_url = '/static/insights-core.egg'
+        if egg_gpg_url is None:
+            egg_gpg_url = '/v1/static/core/insights-core.egg.asc'
+            # if self.config.legacy_upload:
+            #     egg_gpg_url = '/v1/static/core/insights-core.egg.asc'
+            # else:
+            #     egg_gpg_url = '/static/insights-core.egg.asc'
         # run fetch for egg
-        updated = self._fetch(self.config.egg_path,
+        updated = self._fetch(egg_url,
                               constants.core_etag_file,
                               fetch_results['core'],
                               force)
@@ -82,29 +125,37 @@ class InsightsClient(object):
         if updated:
             logger.debug("New core was fetched.")
             logger.debug("Beginning fetch for core gpg signature.")
-            self._fetch(self.config.egg_gpg_path,
+            self._fetch(egg_gpg_url,
                         constants.core_gpg_sig_etag_file,
                         fetch_results['gpg_sig'],
                         force)
 
             return fetch_results
 
+    @_net
     def _fetch(self, path, etag_file, target_path, force):
         """
             returns (str): path to new egg. None if no update.
         """
-        # setup a request session
-        if not self.session:
-            self.connection = client.get_connection(self.config)
-            self.session = self.connection.session
-
-        url = self.connection.base_url + path
         # Searched for cached etag information
         current_etag = None
         if os.path.isfile(etag_file):
             with open(etag_file, 'r') as fp:
                 current_etag = fp.read().strip()
                 logger.debug('Found etag %s', current_etag)
+
+        # it's only temporary. I promise. this is the worst timeline
+        # all for a phone popup
+        if self.config.legacy_upload:
+            url = self.connection.base_url + path
+            # verify = self.config.cert_verify
+        else:
+            url = self.connection.base_url.split('/platform')[0] + path
+            # if self.config.cert_verify is True:
+            #     # dont overwrite satellite cert
+            #     self.cert_verify = os.path.join(
+            #         constants.default_conf_dir,
+            #         'cert-api.access.redhat.com.pem')
 
         # Setup the new request for core retrieval
         logger.debug('Making request to %s for new core', url)
@@ -115,10 +166,10 @@ class InsightsClient(object):
         if current_etag and not force:
             logger.debug('Requesting new file with etag %s', current_etag)
             etag_headers = {'If-None-Match': current_etag}
-            response = self.session.get(url, headers=etag_headers)
+            response = self.session.get(url, headers=etag_headers, timeout=self.config.http_timeout)
         else:
             logger.debug('Found no etag or forcing fetch')
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=self.config.http_timeout)
 
         # Debug information
         logger.debug('Status code: %d', response.status_code)
@@ -278,6 +329,7 @@ class InsightsClient(object):
         logger.debug("The new Insights Core was installed successfully.")
         return {'success': True}
 
+    @_net
     def update_rules(self):
         """
             returns (dict): new client rules
@@ -286,68 +338,52 @@ class InsightsClient(object):
             logger.debug("Bypassing rule update due to config "
                 "running in offline mode or auto updating turned off.")
         else:
-            return client.update_rules(self.config)
+            return client.update_rules(self.config, self.connection)
 
+    @_net
     def collect(self):
         # return collection results
-        tar_file = client.collect(self.config)
+        tar_file = client.collect(self.config, self.connection)
 
         # it is important to note that --to-stdout is utilized via the wrapper RPM
         # this file is received and then we invoke shutil.copyfileobj
         return tar_file
 
-    def register(self, force_register=False):
+    @_net
+    def register(self):
         """
-            returns (json): {'success': bool,
-                            'machine-id': uuid from API,
-                            'response': response from API,
-                            'code': http code}
+            returns (bool | None):
+                True - machine is registered
+                False - machine is unregistered
+                None - could not reach the API
         """
-        self.config.register = True
-        if force_register:
-            self.config.reregister = True
-        return client.handle_registration(self.config)
+        return client.handle_registration(self.config, self.connection)
 
+    @_net
     def unregister(self):
         """
             returns (bool): True success, False failure
         """
-        return client.handle_unregistration(self.config)
+        return client.handle_unregistration(self.config, self.connection)
 
-    def get_registration_information(self):
+    @_net
+    def upload(self, payload=None, content_type=None):
         """
-            returns (json): {'machine-id': uuid from API,
-                            'response': response from API}
-        """
-        registration_status = client.get_registration_status(self.config)
-        return {'machine-id': client.get_machine_id(),
-                'registration_status': registration_status,
-                'is_registered': registration_status['status']}
-
-    def upload(self, path, rotate_eggs=True):
-        """
+            Upload the archive at `path` with content type `content_type`
             returns (int): upload status code
         """
-        # do the upload
-        upload_results = client.upload(self.config, path)
-        if upload_results:
+        # platform - prefer the value passed in to func over config
+        payload = payload or self.config.payload
+        content_type = content_type or self.config.content_type
 
-            # delete the archive
-            if self.config.keep_archive:
-                logger.info('Insights archive retained in ' + path)
-            else:
-                client.delete_archive(path)
+        if payload is None:
+            raise ValueError('Specify a file to upload.')
 
-            # if we are rotating the eggs and success on upload do rotation
-            if rotate_eggs:
-                try:
-                    self.rotate_eggs()
-                except IOError:
-                    message = ("Failed to rotate %s to %s" %
-                               (constants.insights_core_newest,
-                                constants.insights_core_last_stable))
-                    logger.debug(message)
-                    raise IOError(message)
+        if not os.path.exists(payload):
+            raise IOError('Cannot upload %s: File does not exist.' % payload)
+
+        upload_results = client.upload(
+            self.config, self.connection, payload, content_type)
 
         # return api response
         return upload_results
@@ -405,20 +441,63 @@ class InsightsClient(object):
             logger.debug('Last upload file %s not found, cannot read results', constants.last_upload_results_file)
             return False
 
-    def delete_archive(self, path):
+    def delete_archive(self, path, delete_parent_dir=False):
         """
             returns (bool): successful archive deletion
         """
-        return client.delete_archive(path)
+        return client.delete_archive(path, delete_parent_dir)
 
-    def _is_client_registered(self):
-        return client._is_client_registered(self.config)
+    @_net
+    def get_registration_status(self):
+        """
+            returns (json):
+                {'messages': [dotfile message, api message],
+                 'status': (bool) registered = true; unregistered = false
+                 'unreg_date': Date the machine was unregistered | None,
+                 'unreachable': API could not be reached}
+        """
+        return client.get_registration_status(self.config, self.connection)
 
-    def try_register(self):
-        return client.try_register(self.config)
+    @_net
+    def set_display_name(self, display_name):
+        '''
+            returns True on success, False on failure
+        '''
+        return self.connection.set_display_name(display_name)
 
-    def get_connection(self):
-        return client.get_connection(self.config)
+    @_net
+    def get_diagnosis(self, remediation_id=None):
+        '''
+            returns JSON of diagnosis data on success, None on failure
+            Optional arg remediation_id to get a particular remediation set.
+        '''
+        if self.config.offline:
+            logger.error('Cannot get diagnosis in offline mode.')
+            return None
+        return self.connection.get_diagnosis(remediation_id)
+
+    def delete_cached_branch_info(self):
+        '''
+            Deletes cached branch_info file
+        '''
+        if os.path.isfile(constants.cached_branch_info):
+            logger.debug('Deleting cached branch_info file...')
+            os.remove(constants.cached_branch_info)
+        else:
+            logger.debug('Cached branch_info file does not exist.')
+
+    def get_machine_id(self):
+        return client.get_machine_id()
+
+    def clear_local_registration(self):
+        '''
+        Deletes dotfiles and machine-id for fresh registration
+        '''
+        delete_registered_file()
+        delete_unregistered_file()
+        write_to_disk(constants.machine_id_file, delete=True)
+        logger.debug('Re-register set, forcing registration.')
+        logger.debug('New machine-id: %s', generate_machine_id(new=True))
 
 
 def format_config(config):

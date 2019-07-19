@@ -19,23 +19,17 @@ output of this command looks like::
    HA2|  51|       D51|         lu0417|749, patch 10, changelist 1698137|          /usr/sap/HA2/D51/exe
 
 Examples:
-    >>> lssap = shared[Lssap]
-    >>> lssap.instances()
+    >>> lssap.instances
     ['D16', 'D22', 'D50', 'D51']
     >>> lssap.version('D51')
-    '749, path 10, changelist 1698137'
-    >>> lssap.is_instance()
-    True
+    '749, patch 10, changelist 1698137'
     >>> lssap.is_hana()
     False
-    >>> lssap.data[3]
-    {'SID': 'HA2', 'Nr': '51', 'Instance': 'D51', 'SAPLOCALHOST': 'lu0417',
-     'Version': '749, path 10, changelist 1698137', 'DIR_EXECUTABLE': '/usr/sap/HA2/D51/exe'}
     >>> lssap.data[3]['Instance']
     'D51'
 """
-from .. import parser, CommandParser
-from insights.parsers import ParseException, parse_delimited_table
+from insights import parser, CommandParser
+from insights.parsers import SkipException, ParseException, parse_delimited_table
 from insights.specs import Specs
 
 
@@ -43,35 +37,32 @@ from insights.specs import Specs
 class Lssap(CommandParser):
     """Class to parse ``lssap`` command output.
 
+    Raises:
+        SkipException: Nothing needs to be parsed.
+        ParseException: Raised if any error occurs parsing the content.
+
     Attributes:
         data (list): List of dicts, where the keys in each dict are the column
             headers and each item in the list represents a SID.
-
-    Raises:
-        ParseException: Raised if any error occurs parsing the content.
+        sid (list): List of the SIDs from the SID column.
+        instances (list): List of instances running on the system.
+        instance_types (list): List of instance types running on the system.
     """
-    instance_dict = {'D': 'netweaver',
-                     'HDB': 'hana',
-                     'ASCS': 'ascs'}
-
-    def __init__(self, *args, **kwargs):
-        self.data = []
-        super(Lssap, self).__init__(*args, **kwargs)
-
     def parse_content(self, content):
+        if not content:
+            raise SkipException()
+
+        self.data = []
         # remove lssap version and bar text from content
         clean_content = content[2:-1]
-        if len(clean_content) > 0 and "SID" in clean_content[0]:
+        if len(clean_content) > 0 and clean_content[0].lstrip().startswith("SID"):
             self.data = parse_delimited_table(clean_content, delim='|', header_delim=None)
         else:
             raise ParseException("Lssap: Unable to parse {0} line(s) of content: ({1})".format(len(content), content))
 
-        self.running_inst_types = [row["Instance"].rstrip('1234567890') for row in self.data if "Instance" in row]
-
-        invalid_inst = [i for i in self.running_inst_types if i not in self.instance_dict]
-
-        if invalid_inst:
-            raise ParseException("Lssap: Invalid instance parsed in content: {0}".format(invalid_inst))
+        self.sid = sorted(set(row["SID"] for row in self.data if "SID" in row))
+        self.instances = [row["Instance"] for row in self.data if "Instance" in row]
+        self.instance_types = sorted(set(inst.rstrip('1234567890') for inst in self.instances))
 
     def version(self, instance):
         """str: returns the Version column corresponding to the ``instance`` in
@@ -81,24 +72,14 @@ class Lssap(CommandParser):
             if instance == row['Instance']:
                 return row["Version"]
 
-    @property
-    def instances(self):
-        """list: List instances running on the system."""
-        return [row["Instance"] for row in self.data if "Instance" in row]
-
-    @property
-    def sid(self):
-        """list: Returns a list of the SIDs from the SID column."""
-        return list(set(row["SID"] for row in self.data if "SID" in row))
-
     def is_netweaver(self):
-        """bool: SAP Netweaver is running on the system."""
-        return 'D' in list(set(self.running_inst_types) & set(self.instance_dict.keys()))
+        """bool: Is any SAP NetWeaver instance detected?"""
+        return 'D' in self.instance_types
 
     def is_hana(self):
-        """bool: SAP Hana is running on the system."""
-        return 'HDB' in list(set(self.running_inst_types) & set(self.instance_dict.keys()))
+        """bool: Is any SAP HANA instance detected?"""
+        return 'HDB' in self.instance_types
 
     def is_ascs(self):
-        """bool: SAP System Central Services is running on the system."""
-        return 'ASCS' in list(set(self.running_inst_types) & set(self.instance_dict.keys()))
+        """bool: Is any SAP System Central Services instance detected?"""
+        return 'ASCS' in self.instance_types

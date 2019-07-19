@@ -1,22 +1,37 @@
 """
-MultipathConf - file ``/etc/multipath.conf``
-============================================
+multipath.conf file content
+===========================
 
-The main class is the MultipathConf class, which reads the multipath daemon's
-``/etc/multipath.conf`` configuration file.  This is in a pseudo-JSON format.
+The base class is the MultipathConfParser class, which reads the multipath
+daemon's ``/etc/multipath.conf`` configuration file.
+This is in a pseudo-JSON format.
+
+MultipathConf - file ``/etc/multipath.conf``
+--------------------------------------------
+
+MultipathConfInitramfs - command ``lsinitrd -f /etc/multipath.conf``
+--------------------------------------------------------------------
 
 """
 
+import string
 from insights.contrib import pyparsing as p
 from insights import parser, Parser, LegacyItemAccess
 from insights.core import ConfigParser
-from insights.configtree.dictlike import parse_doc
+from insights.parsers import SkipException
+from insights.parsr import (EOF, Forward, LeftCurly, Lift, Literal, LineEnd,
+        RightCurly, Many, Number, OneLineComment, PosMarker, skip_none, String,
+        QuotedString, WS, WSChar)
+from insights.parsr.query import Entry
 from insights.specs import Specs
 
 
-@parser(Specs.multipath_conf)
-class MultipathConf(Parser, LegacyItemAccess):
+class MultipathConfParser(Parser, LegacyItemAccess):
     """
+    Shared parser for the file ``/etc/multipath.conf`` and output of
+    ``lsinitrd -f /etc/multipath.conf`` applied to
+    /boot/initramfs-<kernel-version>.img.
+
     Return a dict where the keys are the name of sections in multipath
     configuraion file.  If there are subsections, the value is a list of
     dictionaries with parameters as key and value.  Otherwise the value is
@@ -88,17 +103,6 @@ class MultipathConf(Parser, LegacyItemAccess):
             }
           ]
         }
-
-    Examples:
-        >>> conf = shared[MultipathConf]
-        >>> conf.data['blacklist']['devnode']  # Access via data property
-        '^hd[a-z]'
-        >>> conf['defaults']['user_friendly_names']  # Pseudo-dict access
-        'yes'
-        >>> len(conf['multipaths'])
-        2
-        >>> conf['multipaths'][0]['alias']
-        'yellow'
     """
 
     @classmethod
@@ -130,18 +134,83 @@ class MultipathConf(Parser, LegacyItemAccess):
         return my_conf
 
     def parse_content(self, content):
-        self.data = MultipathConf._create_parser().parseString("\n".join(content))[0].asDict()
+        if not content:
+            raise SkipException("Empty content.")
+        self.data = MultipathConfParser._create_parser().parseString("\n".join(content))[0].asDict()
+
+
+@parser(Specs.multipath_conf)
+class MultipathConf(MultipathConfParser):
+    """
+    Parser for the file ``/etc/multipath.conf``.
+
+    Examples:
+        >>> conf = shared[MultipathConf]
+        >>> conf.data['blacklist']['devnode']  # Access via data property
+        '^hd[a-z]'
+        >>> conf['defaults']['user_friendly_names']  # Pseudo-dict access
+        'yes'
+        >>> len(conf['multipaths'])
+        2
+        >>> conf['multipaths'][0]['alias']
+        'yellow'
+    """
+    pass
+
+
+@parser(Specs.multipath_conf_initramfs)
+class MultipathConfInitramfs(MultipathConfParser):
+    """
+    Parser for the output of ``lsinitrd -f /etc/multipath.conf`` applied to
+    /boot/initramfs-<kernel-version>.img.
+
+    Examples:
+        >>> conf = shared[MultipathConfInitramfs]
+        >>> conf.data['blacklist']['devnode']  # Access via data property
+        '^hd[a-z]'
+        >>> conf['defaults']['user_friendly_names']  # Pseudo-dict access
+        'yes'
+        >>> len(conf['multipaths'])
+        2
+        >>> conf['multipaths'][0]['alias']
+        'yellow'
+    """
+    pass
+
+
+def parse_doc(content, ctx):
+    def to_entry(name, rest):
+        if isinstance(rest, list):
+            return Entry(name=name.value, children=rest, lineno=name.lineno, src=ctx)
+        return Entry(name=name.value, attrs=[rest], lineno=name.lineno, src=ctx)
+
+    Stmt = Forward()
+    Num = Number & (WSChar | LineEnd)
+    NULL = Literal("none", value=None)
+    Comment = (WS >> OneLineComment("#").map(lambda x: None))
+    BeginBlock = (WS >> LeftCurly << WS)
+    EndBlock = (WS >> RightCurly << WS)
+    Bare = String(set(string.printable) - (set(string.whitespace) | set("#{}'\"")))
+    Name = WS >> PosMarker(String(string.ascii_letters + "_")) << WS
+    Value = WS >> (Num | NULL | QuotedString | Bare) << WS
+    Block = BeginBlock >> Many(Stmt).map(skip_none) << EndBlock
+    Stanza = (Lift(to_entry) * Name * (Block | Value)) | Comment
+    Stmt <= WS >> Stanza << WS
+    Doc = Many(Stmt).map(skip_none)
+    Top = Doc + EOF
+
+    return Entry(children=Top(content)[0])
 
 
 @parser(Specs.multipath_conf)
 class MultipathConfTree(ConfigParser):
     """
-    Exposes multipath configuration through the configtree interface.
+    Exposes multipath configuration through the parsr query interface.
 
     See the :py:class:`insights.core.ConfigComponent` class for example usage.
     """
     def parse_doc(self, content):
-        return parse_doc("\n".join(content), ctx=self, line_end="\n")
+        return parse_doc("\n".join(content), ctx=self)
 
 
 def get_tree(root=None):
@@ -151,3 +220,25 @@ def get_tree(root=None):
     """
     from insights import run
     return run(MultipathConfTree, root=root).get(MultipathConfTree)
+
+
+@parser(Specs.multipath_conf_initramfs)
+class MultipathConfTreeInitramfs(ConfigParser):
+    """
+    Exposes the multipath configuration from initramfs image through the
+    parsr query interface.
+
+    See the :py:class:`insights.core.ConfigComponent` class for example usage.
+    """
+    def parse_doc(self, content):
+        return parse_doc("\n".join(content), ctx=self)
+
+
+def get_tree_from_initramfs(root=None):
+    """
+    This is a helper function to get a multipath configuration(from initramfs
+    image) component for your local machine or an archive. It's for use in
+    interactive sessions.
+    """
+    from insights import run
+    return run(MultipathConfTreeInitramfs, root=root).get(MultipathConfTreeInitramfs)

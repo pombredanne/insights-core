@@ -28,8 +28,8 @@ OcGetEndPoints - command ``oc get endpoints -o yaml --all-namespaces``
 OcGetEvent - command ``oc get event -o yaml --all-namespaces``
 --------------------------------------------------------------
 
-OcGetNode - command ``oc get node -o yaml``
--------------------------------------------
+OcGetNode - command ``oc get nodes -o yaml``
+--------------------------------------------
 
 OcGetPod - command ``oc get pod -o yaml --all-namespaces``
 ----------------------------------------------------------
@@ -57,6 +57,9 @@ OcGetRoute - command ``oc get route -o yaml --all-namespaces``
 
 OcGetService - command ``oc get service -o yaml --all-namespaces``
 ------------------------------------------------------------------
+
+OcGetConfigmap - command ``oc get configmap -o yaml --all-namespaces``
+----------------------------------------------------------------------
 
 Examples:
     >>> type(setting_dic)
@@ -143,7 +146,7 @@ class OcGetEvent(CommandParser, YAMLParser):
 
 @parser(Specs.oc_get_node)
 class OcGetNode(CommandParser, YAMLParser):
-    """Class to parse ``oc get node -o yaml --all-namespaces``"""
+    """Class to parse ``oc get nodes -o yaml``"""
 
     @property
     def nodes(self):
@@ -238,4 +241,14 @@ class OcGetService(CommandParser, YAMLParser):
     @property
     def services(self):
         """ dict: Returns a dictionary of openshift services information."""
+        return metadata_name_items(self.data)
+
+
+@parser(Specs.oc_get_configmap)
+class OcGetConfigmap(CommandParser, YAMLParser):
+    """Class to parse ``oc get configmap -o yaml --all-namespaces``"""
+
+    @property
+    def configmaps(self):
+        """ dict: Returns a dictionary of openshift configmaps information."""
         return metadata_name_items(self.data)
